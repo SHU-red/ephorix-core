@@ -40,6 +40,22 @@ curl -H "X-EphoriX-Token: ephorix-dev-1" localhost:3000/api/v1/agoge-types
 
 Migrations run automatically on boot (`sqlx::migrate!`).
 
+Everything in `docker-compose.yml` is env-driven; copy `.env.example` to `.env`
+and adjust (ports, credentials, volume, image tag, CORS origins). The API
+healthcheck keeps `depends_on: service_healthy` honest — the api container
+only becomes "healthy" when `/healthz` answers.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EPHORIX_DB_USER` / `EPHORIX_DB_PASSWORD` / `EPHORIX_DB_NAME` | `ephorix` | database credentials |
+| `EPHORIX_DB_PORT` | `5432` | host port for the database (omit to keep DB stack-internal) |
+| `EPHORIX_PG_VOLUME` | `ephorix_pgdata` | named volume, or an absolute host path for a bind mount |
+| `EPHORIX_TIMESCALE_TAG` | `latest-pg16` | TimescaleDB image tag |
+| `EPHORIX_DATABASE_URL` | built from the above | full override (needed if the password contains URL-reserved chars) |
+| `EPHORIX_API_PORT` | `3000` | host port for the API |
+| `EPHORIX_CORS_ORIGINS` | localhost:8080 | comma-separated browser origins allowed to call the API |
+| `EPHORIX_LOG_LEVEL` | `info,ephorix_api=debug` | `RUST_LOG` filter |
+
 Frontend (dev, port 8080):
 
 ```bash
@@ -52,6 +68,29 @@ trunk serve --open
 Set BASE / TOKEN in the header and hit SYNC. Drag on the timeline to select a
 range → "CREATE SESSION FROM SELECTION"; hover to a time → "CLOSE OPEN AT
 CURSOR".
+
+## Deploying to a server
+
+The watch does **not** need the frontend — it talks to the API directly.
+Minimal production stack: `docker compose up --build -d` behind TLS.
+
+1. **Rotate the seeded tokens.** `0002_seed.sql` ships dev tokens
+   (`ephorix-dev-1`, `ephorix-dev-2`). Add real users on the box:
+   ```sql
+   INSERT INTO users (token, display_name) VALUES ('<long-random-token>', 'Leonidas');
+   ```
+   (or `UPDATE users SET token = ... WHERE id = ...`). Put the token into the
+   watch's config page (long-press the app in the Pebble phone app →
+   Settings → BACKEND BASE URL + TOKEN).
+2. **TLS in front.** The API is plain HTTP; put Caddy/nginx in front
+   (Caddy: `reverse_proxy 127.0.0.1:3000` + your domain). Set
+   `EPHORIX_CORS_ORIGINS` to the served frontend origin if you host the UI
+   on a domain.
+3. **Backup** `EPHORIX_PG_VOLUME` (or the bind-mount path). The hypertable
+   and all data live there.
+4. **Watch defaults.** `src/js/pebble-js-app.js` defaults to
+   `http://192.168.1.10:3000` — the config page overrides it; nothing to
+   recompile.
 
 ## Verify
 

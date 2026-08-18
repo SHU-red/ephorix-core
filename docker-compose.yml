@@ -1,18 +1,23 @@
 services:
   db:
-    image: timescale/timescaledb:latest-pg16
+    image: timescale/timescaledb:${EPHORIX_TIMESCALE_TAG:-latest-pg16}
     container_name: ephorix-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ephorix
-      POSTGRES_PASSWORD: ephorix
-      POSTGRES_DB: ephorix
+      POSTGRES_USER: ${EPHORIX_DB_USER:-ephorix}
+      POSTGRES_PASSWORD: ${EPHORIX_DB_PASSWORD:-ephorix}
+      POSTGRES_DB: ${EPHORIX_DB_NAME:-ephorix}
     ports:
-      - "5432:5432"
+      # Host port only; the container port stays 5432 (DATABASE_URL uses the
+      # internal network, so this mapping is optional — omit it to keep the
+      # database unreachable from outside the stack).
+      - "${EPHORIX_DB_PORT:-5432}:5432"
     volumes:
-      - ephorix_pgdata:/var/lib/postgresql/data
+      # Named volume by default; set EPHORIX_PG_VOLUME to an absolute host
+      # path (e.g. /var/lib/ephorix/pgdata) for a bind mount.
+      - ${EPHORIX_PG_VOLUME:-ephorix_pgdata}:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ephorix -d ephorix"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -23,15 +28,23 @@ services:
     container_name: ephorix-api
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://ephorix:ephorix@db:5432/ephorix
+      # Override wholesale if the password contains URL-reserved characters
+      # or the db service name/port ever changes.
+      DATABASE_URL: ${EPHORIX_DATABASE_URL:-postgres://${EPHORIX_DB_USER:-ephorix}:${EPHORIX_DB_PASSWORD:-ephorix}@db:5432/${EPHORIX_DB_NAME:-ephorix}}
       EPHORIX_BIND: 0.0.0.0:3000
-      EPHORIX_CORS_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
-      RUST_LOG: info,ephorix_api=debug
+      EPHORIX_CORS_ORIGINS: ${EPHORIX_CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      RUST_LOG: ${EPHORIX_LOG_LEVEL:-info,ephorix_api=debug}
     ports:
-      - "3000:3000"
+      - "${EPHORIX_API_PORT:-3000}:3000"
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
 volumes:
   ephorix_pgdata:
