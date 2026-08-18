@@ -1,0 +1,117 @@
+/* EphoriX — strictly black & red, Spartan discipline. */
+
+:root {
+  --red: #e53935;
+  --red-dark: #7b0000;
+  --bg: #0a0a0a;
+  --panel: #101010;
+  --line: #232323;
+  --text: #ededed;
+  --muted: #8f8f8f;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; border-radius: 0 !important; }
+
+html, body { background: var(--bg); color: var(--text); }
+
+body {
+  font-family: "IBM Plex Mono", ui-monospace, "Courier New", monospace;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+h1, h2 {
+  font-family: "Anton", "Arial Narrow", Impact, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-weight: 400;
+}
+
+.app { max-width: 1200px; margin: 0 auto; padding: 0 24px 40px; display: flex; flex-direction: column; gap: 20px; }
+
+/* ---------------- Header ---------------- */
+
+.header {
+  display: flex; justify-content: space-between; align-items: flex-end; gap: 24px;
+  padding: 26px 0 18px; border-bottom: 3px solid var(--red);
+  flex-wrap: wrap;
+}
+
+.brand h1 { font-size: 44px; line-height: 1; color: var(--red); text-shadow: 0 0 24px rgba(229, 57, 53, 0.35); }
+.brand .sub { color: var(--muted); letter-spacing: 0.34em; font-size: 11px; }
+
+.controls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+
+.ctl { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 10px; letter-spacing: 0.18em; }
+
+input, select {
+  background: #050505; color: var(--text); border: 1px solid var(--line);
+  padding: 7px 10px; font-family: inherit; font-size: 12px; min-width: 200px;
+}
+input:focus, select:focus { outline: none; border-color: var(--red); }
+
+select { min-width: 120px; }
+
+/* ---------------- Buttons ---------------- */
+
+.btn {
+  background: #000; color: var(--red); border: 2px solid var(--red);
+  padding: 8px 18px; font-family: "Anton", "Arial Narrow", sans-serif;
+  letter-spacing: 0.14em; text-transform: uppercase; cursor: pointer; font-size: 13px;
+}
+.btn:hover:not(:disabled) { background: var(--red); color: #000; }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn.small { padding: 4px 10px; font-size: 10px; border-width: 1px; }
+
+/* ---------------- Panels ---------------- */
+
+.panel { border: 1px solid var(--line); background: var(--panel); padding: 16px; }
+.panel-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+.panel-head h2 { color: var(--red); font-size: 18px; }
+
+.muted { color: var(--muted); font-size: 11px; letter-spacing: 0.08em; }
+
+.banner-error {
+  border: 2px solid var(--red); background: rgba(229, 57, 53, 0.08);
+  color: #ff8a80; padding: 10px 14px; font-size: 12px; overflow-wrap: anywhere;
+}
+
+/* ---------------- Timeline ---------------- */
+
+.chart-wrap { position: relative; }
+.chart { width: 100%; }
+.session-overlay { position: absolute; pointer-events: none; }
+.session-bar { position: absolute; top: 0; bottom: 0; opacity: 0.5; border: 1px solid #000; }
+.session-bar.open { opacity: 0.75; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35); }
+
+.timeline-actions {
+  display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line);
+}
+.cursor-readout { align-self: center; }
+
+/* ---------------- Lists ---------------- */
+
+.lower { display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; }
+@media (max-width: 900px) { .lower { grid-template-columns: 1fr; } }
+
+.list { list-style: none; display: flex; flex-direction: column; gap: 6px; max-height: 360px; overflow-y: auto; }
+
+.row {
+  display: flex; align-items: center; gap: 10px; border: 1px solid var(--line);
+  padding: 6px 10px; background: #0d0d0d;
+}
+.row.open { border-color: var(--red); }
+.dot { width: 10px; height: 10px; flex: 0 0 auto; }
+.row-name { font-weight: 600; letter-spacing: 0.06em; flex: 1; }
+.row-time { color: var(--muted); font-size: 11px; }
+
+.inline-form { display: flex; gap: 8px; margin-top: 12px; }
+.inline-form input { flex: 1; min-width: 0; }
+
+/* ---------------- Footer ---------------- */
+
+footer {
+  border-top: 1px solid var(--line); padding-top: 14px;
+  color: var(--muted); font-size: 10px; letter-spacing: 0.3em; text-align: center;
+}

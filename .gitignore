@@ -1,0 +1,16 @@
+# Rust
+/target
+**/target/
+
+# Env / secrets
+.env
+.env.local
+
+# Trunk / wasm build output
+frontend/dist/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

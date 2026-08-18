@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EphoriX</title>
+  <link data-trunk rel="copy-dir" href="public" data-target-path="." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='black'/><text x='8' y='12' font-size='12' fill='%23e53935' text-anchor='middle' font-family='monospace' font-weight='bold'>Λ</text></svg>" />
+  <link rel="stylesheet" href="/vendor/uPlot.min.css" />
+  <link rel="stylesheet" href="/style.css" />
+  <!-- Optional Spartan display font; degrades to Arial Narrow offline. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Anton&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <!-- Chart engine + EphoriX bridge must load before the wasm bundle. -->
+  <script src="/vendor/uPlot.min.js"></script>
+  <script src="/uplot-bridge.js"></script>
+  <noscript>EphoriX requires JavaScript.</noscript>
+</body>
+</html>

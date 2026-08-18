@@ -1,0 +1,37 @@
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: ephorix-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ephorix
+      POSTGRES_PASSWORD: ephorix
+      POSTGRES_DB: ephorix
+    ports:
+      - "5432:5432"
+    volumes:
+      - ephorix_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ephorix -d ephorix"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  api:
+    build:
+      context: ./backend
+    container_name: ephorix-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://ephorix:ephorix@db:5432/ephorix
+      EPHORIX_BIND: 0.0.0.0:3000
+      EPHORIX_CORS_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+      RUST_LOG: info,ephorix_api=debug
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  ephorix_pgdata:

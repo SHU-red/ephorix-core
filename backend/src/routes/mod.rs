@@ -1,0 +1,75 @@
+pub mod agoge_sessions;
+pub mod agoge_types;
+pub mod events;
+pub mod health;
+pub mod timeline;
+
+use axum::{
+    http::{HeaderName, Method},
+    middleware,
+    routing::{get, patch, post, put},
+    Router,
+};
+use sqlx::PgPool;
+use tower_http::cors::{Any, CorsLayer};
+
+use crate::auth;
+
+/// Public liveness probe (no auth).
+async fn healthz() -> &'static str {
+    "ok"
+}
+
+pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
+    let cors = if cors_origins.is_empty() {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_headers([HeaderName::from_static(auth::AUTH_HEADER), "content-type".parse().unwrap()])
+            .allow_methods(Any)
+    } else {
+        let origins: Vec<axum::http::HeaderValue> = cors_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_headers([HeaderName::from_static(auth::AUTH_HEADER), "content-type".parse().unwrap()])
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE])
+    };
+
+    // The auth middleware guards the whole /api/v1 subtree. /healthz stays
+    // public for orchestration probes (build it on a separate router so the
+    // route_layer cannot touch it).
+    let api = Router::new()
+        .route(
+            "/api/v1/health/batch",
+            post(health::ingest_batch),
+        )
+        .route("/api/v1/events/marker", post(events::ingest_marker))
+        .route("/api/v1/events/markers", get(events::list_markers))
+        .route(
+            "/api/v1/agoge-types",
+            get(agoge_types::list).post(agoge_types::create),
+        )
+        .route(
+            "/api/v1/agoge-types/{id}",
+            put(agoge_types::update).delete(agoge_types::delete),
+        )
+        .route(
+            "/api/v1/agoge-sessions",
+            get(agoge_sessions::list).post(agoge_sessions::create),
+        )
+        .route(
+            "/api/v1/agoge-sessions/{id}",
+            patch(agoge_sessions::update).delete(agoge_sessions::delete),
+        )
+        .route("/api/v1/timeline", get(timeline::get_timeline))
+        .route_layer(middleware::from_fn_with_state(pool.clone(), auth::require_auth));
+
+    Router::new()
+        .route("/healthz", get(healthz))
+        .merge(api)
+        .with_state(pool)
+        .layer(cors)
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+}
