@@ -96,16 +96,14 @@ can be locked by sha.
 Deploy from the registry (no toolchain needed on the server):
 
 ```bash
-# .env: EPHORIX_API_TAG=latest
-#       EPHORIX_WEB_TAG=latest
+# .env: EPHORIX_TAG=latest   # one tag = the whole product (api + web)
 docker compose pull
 docker compose up -d
 ```
 
-For a dev server following main: set `EPHORIX_API_TAG`/`EPHORIX_WEB_TAG` to
-`dev` (or a specific `dev-<sha>`), then the same pull + up.
-`docker compose up --build` still builds locally from the repo when you want
-that.
+For a dev server following main: set `EPHORIX_TAG=dev` (or a specific
+`dev-<sha>`), then the same pull + up. `docker compose up --build` still
+builds locally from the repo when you want that.
 
 The timescaledb database image is upstream and not CI-built.
 
