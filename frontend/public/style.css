@@ -316,6 +316,34 @@ select { min-width: 120px; }
   width: 42px; min-width: 42px; padding: 2px; height: 34px;
 }
 
+/* ---------------- Agoges (sidebar + config) ---------------- */
+
+.agoges-layout { display: grid; grid-template-columns: 250px 1fr; gap: 16px; align-items: start; }
+@media (max-width: 800px) { .agoges-layout { grid-template-columns: 1fr; } }
+.agoges-sidebar { border: 1px solid var(--line); background: var(--panel); }
+.sidebar-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.sidebar-title { color: var(--red); font-family: "Anton", "Arial Narrow", sans-serif; letter-spacing: 0.14em; font-size: 15px; }
+.sidebar-list { list-style: none; max-height: 520px; overflow-y: auto; }
+.sidebar-item { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; border-bottom: 1px solid var(--line); }
+.sidebar-item:hover { background: #0f0f0f; }
+.sidebar-item.on { background: var(--red-deep); box-shadow: inset 2px 0 0 var(--red); }
+.si-name { flex: 1; font-weight: 600; letter-spacing: 0.06em; }
+.si-cat { color: var(--dim); font-size: 10px; letter-spacing: 0.12em; }
+
+.config-form { display: flex; flex-direction: column; gap: 16px; }
+.config-row { display: flex; gap: 20px; align-items: flex-end; flex-wrap: wrap; }
+.cat-switch { display: flex; flex-wrap: wrap; gap: 6px; }
+.cat-btn {
+  background: #030303; color: var(--muted);
+  border: 1px solid var(--line); padding: 6px 12px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px;
+  letter-spacing: 0.1em; cursor: pointer;
+}
+.cat-btn:hover { border-color: var(--red); color: var(--red); }
+.cat-btn.on { background: var(--red); color: #000; border-color: var(--red); }
+.config-actions { display: flex; gap: 10px; align-items: center; }
+.btn.danger { border-color: var(--red-dark); color: var(--red-bright); }
+.btn.danger:hover { background: var(--red-dark); color: #000; }
 /* ---------------- Tabs ---------------- */
 
 .tabs {
@@ -340,7 +368,6 @@ select { min-width: 120px; }
 .tab:hover .en { display: inline; }
 .tab:hover { border-color: var(--red); color: var(--red); }
 .tab.on { background: var(--red); color: #000; border-color: var(--red); }
-.sync-btn { margin-left: auto; flex: 0 0 auto; }
 
 /* ---------------- Dictionary tab hero ---------------- */
 

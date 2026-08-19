@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::api::*;
-use crate::icons::{glyph_key, glyph_svg, GLYPH_KEYS, LAMBDA, MARK};
+use crate::icons::{glyph_svg, GLYPH_KEYS, LAMBDA, MARK};
 use crate::timeline::{SeriesConfig, TimelineChart};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,13 +192,12 @@ pub fn App() -> impl IntoView {
     let (selection, set_selection) = create_signal(None::<(f64, f64)>);
     let (cursor, set_cursor) = create_signal(None::<f64>);
     let (error, set_error) = create_signal(None::<String>);
-    let (loading, set_loading) = create_signal(false);
     let (selected_type, set_selected_type) = create_signal(None::<String>);
     let (series, set_series) = create_signal(SeriesConfig::default());
     let (settings_loaded, set_settings_loaded) = create_signal(false);
     let clear_sel = create_rw_signal(0u32);
     let reset_zoom = create_rw_signal(0u32);
-    let (editing_type, set_editing_type) = create_signal(None::<String>);
+    let (selected_id, set_selected_id) = create_signal(None::<String>);
     let (nutrition, set_nutrition) = create_signal(Vec::<NutritionEvent>::new());
     let (sleep, set_sleep) = create_signal(Vec::<SleepDay>::new());
     let (detections, set_detections) = create_signal(Vec::<Detection>::new());
@@ -216,12 +215,6 @@ pub fn App() -> impl IntoView {
     // Syssitia manual entry.
     let (manual_kind, set_manual_kind) = create_signal("food".to_string());
     let (manual_amount, set_manual_amount) = create_signal(String::new());
-
-    // Create-form state.
-    let (new_type_name, set_new_type_name) = create_signal(String::new());
-    let (new_type_color, set_new_type_color) = create_signal("#E53935".to_string());
-    let (new_type_icon, set_new_type_icon) = create_signal(GLYPH_KEYS[0].to_string());
-    let (new_type_category, set_new_type_category) = create_signal("mixed".to_string());
 
     // Persist series visibility + range to the backend settings.
     let persist_settings = move || {
@@ -243,7 +236,6 @@ pub fn App() -> impl IntoView {
     };
 
     let refresh = move || {
-        set_loading.set(true);
         set_error.set(None);
         let base = base.get();
         let token = token.get();
@@ -299,7 +291,6 @@ pub fn App() -> impl IntoView {
                     set_settings_loaded.set(true);
                 }
             }
-            set_loading.set(false);
         });
     };
 
@@ -408,23 +399,17 @@ pub fn App() -> impl IntoView {
 
     // -- Agoge types CRUD ----------------------------------------------------
 
-    let add_type = move |_| {
-        let name = new_type_name.get().trim().to_string();
+    let create_type = move |name: String, color: String, icon: String, category: String| {
+        let name = name.trim().to_string();
         if name.is_empty() {
             return;
         }
         let base = base.get();
         let token = token.get();
-        let color = new_type_color.get();
-        let icon = new_type_icon.get();
-        let category = new_type_category.get();
         spawn_local(async move {
             let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category });
             match post_json(&base, &token, "/api/v1/agoge-types", &body).await {
-                Ok(_) => {
-                    set_new_type_name.set(String::new());
-                    refresh();
-                }
+                Ok(_) => refresh(),
                 Err(e) => set_error.set(Some(e)),
             }
         });
@@ -437,7 +422,6 @@ pub fn App() -> impl IntoView {
             let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category });
             match put_json(&base, &token, &format!("/api/v1/agoge-types/{id}"), &body).await {
                 Ok(_) => {
-                    set_editing_type.set(None);
                     refresh();
                 }
                 Err(e) => set_error.set(Some(e)),
@@ -557,9 +541,6 @@ pub fn App() -> impl IntoView {
                         </button>
                     }
                 }).collect_view()}
-                <button class="btn sync-btn" on:click=move |_| refresh() prop:disabled=loading>
-                    {move || if loading.get() { "SYNC…" } else { "SYNC" }}
-                </button>
             </nav>
 
             <div class="meander-rule"></div>
@@ -681,52 +662,57 @@ pub fn App() -> impl IntoView {
 
                     Tab::Agoges => view! {
                         <TabHero tab=Tab::Agoges />
-                        <section class="panel">
-                            <div class="panel-head">
-                                <h2>"AGOGE TYPES"</h2>
-                                <span class="muted">{move || format!("{} types", types.get().len())}</span>
-                            </div>
-                            <ul class="list">
-                                <For each=move || types.get() key=|t| t.id.clone() let:t>
-                                    {move || {
-                                        let t_edit = t.clone();
-                                        let t_edit_id = t_edit.id.clone();
-                                        let t_view = t.clone();
-                                        if editing_type.get().as_ref() == Some(&t.id) {
+                        <div class="agoges-layout">
+                            <aside class="agoges-sidebar">
+                                <div class="sidebar-head">
+                                    <span class="sidebar-title">"AGOGES"</span>
+                                    <button class="btn small" on:click=move |_| set_selected_id.set(None)>"+"</button>
+                                </div>
+                                <ul class="sidebar-list">
+                                    <For each=move || types.get() key=|t| t.id.clone() let:t>
+                                        {move || {
+                                            let tid = t.id.clone();
+                                            let tid_click = tid.clone();
+                                            let tname = t.name.clone();
+                                            let tcolor = t.color_code.clone();
+                                            let tcat = t.category.clone();
                                             view! {
-                                                <TypeEditRow
-                                                    ty=t_edit
-                                                    on_save=Callback::new(move |(n, c, i, cat): (String, String, String, String)| update_type(t_edit_id.clone(), n, c, i, cat))
-                                                    on_cancel=Callback::new(move |_| set_editing_type.set(None))
-                                                />
-                                            }.into_view()
-                                        } else {
-                                            view! {
-                                                <TypeRow
-                                                    ty=t_view
-                                                    on_edit=Callback::new(move |id: String| set_editing_type.set(Some(id)))
-                                                    on_delete=Callback::new(move |id: String| delete_type(id))
-                                                />
-                                            }.into_view()
-                                        }
-                                    }}
-                                </For>
-                            </ul>
-                            <div class="type-create">
-                                <input prop:value=new_type_name on:input=move |ev| set_new_type_name.set(event_target_value(&ev)) placeholder="NEW TYPE NAME" maxlength="40" />
-                                <input type="color" prop:value=new_type_color on:input=move |ev| set_new_type_color.set(event_target_value(&ev)) />
-                                <GlyphPicker value=new_type_icon set=set_new_type_icon />
-                                <select on:change=move |ev| set_new_type_category.set(event_target_value(&ev))>
-                                    <option value="distance">"DISTANCE"</option>
-                                    <option value="repetitive">"REPETITIVE"</option>
-                                    <option value="dynamic">"DYNAMIC"</option>
-                                    <option value="circuit">"CIRCUIT"</option>
-                                    <option value="recovery">"RECOVERY"</option>
-                                    <option value="mixed" selected>"MIXED"</option>
-                                </select>
-                                <button class="btn" on:click=add_type>"ADD"</button>
-                            </div>
-                        </section>
+                                                <li class="sidebar-item" class:on=move || selected_id.get().as_deref() == Some(tid.as_str()) on:click=move |_| set_selected_id.set(Some(tid_click.clone()))>
+                                                    <span class="dot" style=format!("background:{tcolor}")></span>
+                                                    <span class="si-name">{tname}</span>
+                                                    <span class="si-cat">{tcat.to_uppercase()}</span>
+                                                </li>
+                                            }
+                                        }}
+                                    </For>
+                                </ul>
+                            </aside>
+                            <section class="agoges-config panel">
+                                {move || {
+                                    let sel = selected_id.get();
+                                    let ty = sel.as_ref().and_then(|id| types.get().into_iter().find(|t| &t.id == id));
+                                    view! {
+                                        <div key=sel.clone()>
+                                            <AgogeConfigForm
+                                                ty=ty
+                                                on_save=Callback::new(move |(n, c, i, cat): (String, String, String, String)| {
+                                                    if let Some(id) = sel.clone() {
+                                                        update_type(id, n, c, i, cat);
+                                                    } else {
+                                                        create_type(n, c, i, cat);
+                                                    }
+                                                    set_selected_id.set(None);
+                                                })
+                                                on_delete=Callback::new(move |id: String| {
+                                                    delete_type(id);
+                                                    set_selected_id.set(None);
+                                                })
+                                            />
+                                        </div>
+                                    }
+                                }}
+                            </section>
+                        </div>
                     }.into_view(),
 
                     Tab::Askesis => view! {
@@ -989,73 +975,54 @@ fn SessionRow(
     }
 }
 
-/// One Agoge Type row (glyph + name + color + edit/delete).
+/// Full-page config for one Agoge (None = new). Re-mounted on selection change
+/// via `key`, so its field signals re-initialize from the selected type.
 #[component]
-fn TypeRow(
-    ty: AgogeType,
-    on_edit: Callback<String>,
+fn AgogeConfigForm(
+    ty: Option<AgogeType>,
+    on_save: Callback<(String, String, String, String)>,
     on_delete: Callback<String>,
 ) -> impl IntoView {
-    let id = ty.id.clone();
-    let id_edit = id.clone();
-    let id_del = id.clone();
-    let name = ty.name.clone();
-    let glyph = glyph_svg(glyph_key(&ty.icon));
-    let color = ty.color_code.clone();
-    let category = ty.category.clone();
+    let is_new = ty.is_none();
+    let existing_id = ty.as_ref().map(|t| t.id.clone());
+    let (name, set_name) = create_signal(ty.as_ref().map(|t| t.name.clone()).unwrap_or_default());
+    let (color, set_color) = create_signal(ty.as_ref().map(|t| t.color_code.clone()).unwrap_or_else(|| "#E53935".to_string()));
+    let (icon, set_icon) = create_signal(ty.as_ref().map(|t| t.icon.clone()).unwrap_or_else(|| GLYPH_KEYS[0].to_string()));
+    let (category, set_category) = create_signal(ty.as_ref().map(|t| t.category.clone()).unwrap_or_else(|| "mixed".to_string()));
     view! {
-        <li class="row">
-            <span class="dot" style=format!("background:{color}")></span>
-            <span class="row-icon" inner_html=glyph></span>
-            <span class="row-name">{name}</span>
-            <span class="row-time">{category.to_uppercase()}</span>
-            <button class="btn small" on:click=move |_| on_edit.call(id_edit.clone())>
-                "EDIT"
-            </button>
-            <button class="btn small" on:click=move |_| on_delete.call(id_del.clone())>
-                "DELETE"
-            </button>
-        </li>
-    }
-}
-
-/// Inline edit form for one Agoge Type.
-#[component]
-fn TypeEditRow(
-    ty: AgogeType,
-    on_save: Callback<(String, String, String, String)>,
-    on_cancel: Callback<()>,
-) -> impl IntoView {
-    let (name, set_name) = create_signal(ty.name.clone());
-    let (color, set_color) = create_signal(ty.color_code.clone());
-    let (icon, set_icon) = create_signal(ty.icon.clone());
-    let (category, set_category) = create_signal(ty.category.clone());
-    view! {
-        <li class="row edit">
-            <input
-                prop:value=name
-                on:input=move |ev| set_name.set(event_target_value(&ev))
-                maxlength="40"
-            />
-            <input type="color" prop:value=color
-                on:input=move |ev| set_color.set(event_target_value(&ev)) />
-            <GlyphPicker value=icon set=set_icon />
-            <select on:change=move |ev| set_category.set(event_target_value(&ev))>
-                <option value="distance" selected=move || category.get() == "distance">"DISTANCE"</option>
-                <option value="repetitive" selected=move || category.get() == "repetitive">"REPETITIVE"</option>
-                <option value="dynamic" selected=move || category.get() == "dynamic">"DYNAMIC"</option>
-                <option value="circuit" selected=move || category.get() == "circuit">"CIRCUIT"</option>
-                <option value="recovery" selected=move || category.get() == "recovery">"RECOVERY"</option>
-                <option value="mixed" selected=move || category.get() == "mixed">"MIXED"</option>
-            </select>
-            <button class="btn small"
-                on:click=move |_| on_save.call((name.get(), color.get(), icon.get(), category.get()))>
-                "SAVE"
-            </button>
-            <button class="btn small" on:click=move |_| on_cancel.call(())>
-                "CANCEL"
-            </button>
-        </li>
+        <div class="config-form">
+            <label class="ctl">"NAME"
+                <input prop:value=name on:input=move |ev| set_name.set(event_target_value(&ev)) maxlength="40" placeholder="AGOGE NAME" />
+            </label>
+            <div class="config-row">
+                <label class="ctl">"COLOR"
+                    <input type="color" prop:value=color on:input=move |ev| set_color.set(event_target_value(&ev)) />
+                </label>
+                <span class="ctl">"GLYPH"
+                    <GlyphPicker value=icon set=set_icon />
+                </span>
+            </div>
+            <span class="ctl">"CLUSTER"</span>
+            <div class="cat-switch">
+                {[("distance", "DISTANCE"), ("repetitive", "REPETITIVE"), ("dynamic", "DYNAMIC"), ("circuit", "CIRCUIT"), ("recovery", "RECOVERY"), ("mixed", "MIXED")].iter().map(|(val, label)| {
+                    let val = *val;
+                    let label = *label;
+                    view! {
+                        <button class="cat-btn" class:on=move || category.get() == val on:click=move |_| set_category.set(val.to_string())>{label}</button>
+                    }
+                }).collect_view()}
+            </div>
+            <div class="config-actions">
+                <button class="btn" on:click=move |_| on_save.call((name.get(), color.get(), icon.get(), category.get()))>
+                    {if is_new { "CREATE" } else { "SAVE" }}
+                </button>
+                {existing_id.clone().map(|id| {
+                    view! {
+                        <button class="btn danger" on:click=move |_| on_delete.call(id.clone())>"DELETE"</button>
+                    }
+                })}
+            </div>
+        </div>
     }
 }
 
