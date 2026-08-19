@@ -86,10 +86,12 @@ builds the `api` and `web` images and pushes them to GHCR:
 
 | Trigger | Tags |
 |---|---|
-| push to `main` | `dev-<short-sha>` (immutable) + `dev-main` (rolling) |
-| tag `vX.Y.Z` | `latest` + `vX.Y.Z` + `X.Y` |
+| push to `main` | `dev` (rolling) + `dev-<short-sha>` (lock) |
+| tag `vX.Y.Z` | `latest` (rolling) + `vX.Y.Z` + `X.Y` + `<short-sha>` (lock) |
 
-`latest` is **only** produced by release tags, never by main pushes.
+`latest` is **only** produced by release tags, `dev` only by main pushes.
+Every build is additionally tagged with its commit, so any deployed version
+can be locked by sha.
 
 Deploy from the registry (no toolchain needed on the server):
 
@@ -101,7 +103,7 @@ docker compose up -d
 ```
 
 For a dev server following main: set `EPHORIX_API_TAG`/`EPHORIX_WEB_TAG` to
-`dev-main` (or a specific `dev-<sha>`), then the same pull + up.
+`dev` (or a specific `dev-<sha>`), then the same pull + up.
 `docker compose up --build` still builds locally from the repo when you want
 that.
 
