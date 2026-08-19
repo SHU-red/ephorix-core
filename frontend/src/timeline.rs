@@ -152,6 +152,12 @@ pub fn TimelineChart(
         <div class="chart-wrap">
             <div node_ref=chart_ref class="chart" id="ephorix-chart"></div>
             <div node_ref=overlay_ref class="session-overlay"></div>
+            <Show when=move || points.get().is_empty() fallback=|| ()>
+                <div class="chart-empty">
+                    <span class="chart-empty-mark" inner_html=crate::icons::LAMBDA></span>
+                    <p>"NO DATA"</p>
+                </div>
+            </Show>
         </div>
     }
 }

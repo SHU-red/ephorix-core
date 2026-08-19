@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod icons;
 mod timeline;
 
 use app::App;

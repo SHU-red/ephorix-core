@@ -7,11 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::api::*;
+use crate::icons::{glyph_key, glyph_svg, GLYPH_KEYS, HELMET, LAMBDA};
 use crate::timeline::{SeriesConfig, TimelineChart};
-
-/// Fixed icon set for Agoge types (avoids free-form icon text breaking the UI).
-pub const TYPE_ICONS: [&str; 10] =
-    ["🏋️", "🚴", "🧗", "🏃", "🚣", "🤸", "🏊", "⛹️", "🥊", "❓"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,7 +44,7 @@ pub fn App() -> impl IntoView {
     // Create-form state.
     let (new_type_name, set_new_type_name) = create_signal(String::new());
     let (new_type_color, set_new_type_color) = create_signal("#E53935".to_string());
-    let (new_type_icon, set_new_type_icon) = create_signal(TYPE_ICONS[0].to_string());
+    let (new_type_icon, set_new_type_icon) = create_signal(GLYPH_KEYS[0].to_string());
 
     // Persist series visibility + range to the backend settings.
     let persist_settings = move || {
@@ -265,8 +262,11 @@ pub fn App() -> impl IntoView {
         <div class="app">
             <header class="header">
                 <div class="brand">
-                    <h1>"EPHORIX"</h1>
-                    <span class="sub">"AGOGE · TRAINING COMMAND"</span>
+                    <div class="brand-row">
+                        <span class="brand-mark" inner_html=HELMET></span>
+                        <h1>"EPHORIX"</h1>
+                    </div>
+                    <span class="sub">"ΑΓΩΓΗ · TRAINING COMMAND"</span>
                 </div>
                 <div class="controls">
                     <label class="ctl">
@@ -300,6 +300,7 @@ pub fn App() -> impl IntoView {
                     </button>
                 </div>
             </header>
+            <div class="meander-rule"></div>
 
             <Show when=move || error.get().is_some() fallback=|| ()>
                 <div class="banner-error">{move || error.get().unwrap_or_default()}</div>
@@ -451,12 +452,7 @@ pub fn App() -> impl IntoView {
                             />
                             <input type="color" prop:value=new_type_color
                                 on:input=move |ev| set_new_type_color.set(event_target_value(&ev)) />
-                            <select prop:value=new_type_icon
-                                on:change=move |ev| set_new_type_icon.set(event_target_value(&ev))>
-                                <For each=move || TYPE_ICONS.to_vec() key=|i| i.to_string() let:i>
-                                    <option value={i}>{i}</option>
-                                </For>
-                            </select>
+                            <GlyphPicker value=new_type_icon set=set_new_type_icon />
                             <button class="btn" on:click=add_type>"ADD"</button>
                         </div>
                     </section>
@@ -464,7 +460,11 @@ pub fn App() -> impl IntoView {
             </main>
 
             <footer>
-                "EPHORIX · RAW METRICS ARE SACRED · SESSIONS ARE DISCIPLINE"
+                <div class="meander-rule"></div>
+                <div class="footer-line">
+                    <span class="footer-mark" inner_html=LAMBDA></span>
+                    <span>"EPHORIX · RAW METRICS ARE SACRED · SESSIONS ARE DISCIPLINE"</span>
+                </div>
             </footer>
         </div>
     }
@@ -474,29 +474,6 @@ pub fn App() -> impl IntoView {
 fn option_value(ev: &web_sys::Event) -> Option<String> {
     let val = event_target_value(ev);
     if val.is_empty() { None } else { Some(val) }
-}
-
-/// Icon display: DB may hold legacy text names (seed data) or emoji from the
-/// picker; anything unknown falls back to a question mark.
-fn display_icon(icon: &str) -> String {
-    match icon {
-        "dumbbell" => "🏋️".to_string(),
-        "bicycle" => "🚴".to_string(),
-        "mountain" => "🧗".to_string(),
-        "runner" => "🏃".to_string(),
-        "rowing" => "🚣".to_string(),
-        "swim" | "swimming" => "🏊".to_string(),
-        "gymnastics" => "🤸".to_string(),
-        "basketball" => "⛹️".to_string(),
-        "boxing" => "🥊".to_string(),
-        other => {
-            if TYPE_ICONS.contains(&other) {
-                other.to_string()
-            } else {
-                "❓".to_string()
-            }
-        }
-    }
 }
 
 /// One session row. Fields are computed eagerly per For iteration; the
@@ -541,7 +518,7 @@ fn SessionRow(
     }
 }
 
-/// One Agoge Type row (icon + name + color + edit/delete).
+/// One Agoge Type row (glyph + name + color + edit/delete).
 #[component]
 fn TypeRow(
     ty: AgogeType,
@@ -552,12 +529,12 @@ fn TypeRow(
     let id_edit = id.clone();
     let id_del = id.clone();
     let name = ty.name.clone();
-    let icon = display_icon(&ty.icon);
+    let glyph = glyph_svg(glyph_key(&ty.icon));
     let color = ty.color_code.clone();
     view! {
         <li class="row">
             <span class="dot" style=format!("background:{color}")></span>
-            <span class="row-icon">{icon}</span>
+            <span class="row-icon" inner_html=glyph></span>
             <span class="row-name">{name}</span>
             <button class="btn small" on:click=move |_| on_edit.call(id_edit.clone())>
                 "EDIT"
@@ -588,12 +565,7 @@ fn TypeEditRow(
             />
             <input type="color" prop:value=color
                 on:input=move |ev| set_color.set(event_target_value(&ev)) />
-            <select prop:value=icon
-                on:change=move |ev| set_icon.set(event_target_value(&ev))>
-                <For each=move || TYPE_ICONS.to_vec() key=|i| i.to_string() let:i>
-                    <option value={i}>{i}</option>
-                </For>
-            </select>
+            <GlyphPicker value=icon set=set_icon />
             <button class="btn small"
                 on:click=move |_| on_save.call((name.get(), color.get(), icon.get()))>
                 "SAVE"
@@ -602,5 +574,33 @@ fn TypeEditRow(
                 "CANCEL"
             </button>
         </li>
+    }
+}
+
+/// Glyph swatch picker bound to a signal pair holding a glyph key.
+#[component]
+fn GlyphPicker(value: ReadSignal<String>, set: WriteSignal<String>) -> impl IntoView {
+    view! {
+        <div class="glyph-picker">
+            <For
+                each=move || GLYPH_KEYS.to_vec()
+                key=|k| k.to_string()
+                let:k
+            >
+                <button
+                    class={move || {
+                        if value.get() == k {
+                            "glyph-btn active"
+                        } else {
+                            "glyph-btn"
+                        }
+                    }}
+                    title=k
+                    on:click=move |_| set.set(k.to_string())
+                >
+                    <span inner_html=glyph_svg(k)></span>
+                </button>
+            </For>
+        </div>
     }
 }
