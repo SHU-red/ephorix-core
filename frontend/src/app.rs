@@ -52,6 +52,7 @@ pub fn App() -> impl IntoView {
     let (ai_base, set_ai_base) = create_signal(String::new());
     let (ai_model, set_ai_model) = create_signal(String::new());
     let (ai_key, set_ai_key) = create_signal(String::new());
+    let (body_score, set_body_score) = create_signal(None::<f64>);
 
     // Create-form state.
     let (new_type_name, set_new_type_name) = create_signal(String::new());
@@ -104,6 +105,10 @@ pub fn App() -> impl IntoView {
             match fetch_workouts(&base, &token, from_ms, to_ms).await {
                 Ok(d) => set_detections.set(d),
                 Err(e) => set_error.set(Some(e)),
+            }
+            match fetch_body_score(&base, &token, from_ms, to_ms).await {
+                Ok(s) => set_body_score.set(s),
+                Err(_) => {}
             }
             // Settings load once per session (do not clobber user changes).
             if !loaded {
@@ -435,6 +440,47 @@ pub fn App() -> impl IntoView {
             </Show>
 
             <main>
+                <div class="kpi">
+                    <div class="kpi-chip">
+                        <span class="kpi-label">"HEART RATE"</span>
+                        <div class="kpi-value">
+                            {move || points.get().iter().rev().find_map(|p| p.heart_rate)
+                                .map(|v| format!("{v:.0}")).unwrap_or_else(|| "—".to_string())}
+                            <span class="unit">"BPM"</span>
+                        </div>
+                    </div>
+                    <div class="kpi-chip">
+                        <span class="kpi-label">"STEPS"</span>
+                        <div class="kpi-value">
+                            {move || format!("{:.0}", points.get().iter().filter_map(|p| p.steps).sum::<i64>())}
+                            <span class="unit">"RANGE"</span>
+                        </div>
+                    </div>
+                    <div class="kpi-chip">
+                        <span class="kpi-label">"ACTIVE KCAL"</span>
+                        <div class="kpi-value">
+                            {move || format!("{:.0}", points.get().iter().filter_map(|p| p.active_calories).sum::<f64>())}
+                            <span class="unit">"RANGE"</span>
+                        </div>
+                    </div>
+                    <div class="kpi-chip">
+                        <span class="kpi-label">"SLEEP"</span>
+                        <div class="kpi-value">
+                            {move || {
+                                let h = sleep.get().iter().map(|s| s.sleep_seconds).sum::<f64>() / 3600.0;
+                                format!("{h:.1}")
+                            }}
+                            <span class="unit">"H"</span>
+                        </div>
+                    </div>
+                    <div class="kpi-chip">
+                        <span class="kpi-label">"BODY BATTERY"</span>
+                        <div class="kpi-value">
+                            {move || body_score.get().map(|s| format!("{s:.0}")).unwrap_or_else(|| "—".to_string())}
+                            <span class="unit">"/100"</span>
+                        </div>
+                    </div>
+                </div>
                 <section class="panel">
                     <div class="panel-head">
                         <h2>"RAW METRICS / AGOGE OVERLAY"</h2>
@@ -648,6 +694,7 @@ pub fn App() -> impl IntoView {
                     <span class="footer-mark" inner_html=LAMBDA></span>
                     <span>"EPHORIX · RAW METRICS ARE SACRED · SESSIONS ARE DISCIPLINE"</span>
                 </div>
+                <div class="footer-motto">"ΜΟΛΩΝ ΛΑΒΕ"</div>
             </footer>
         </div>
     }

@@ -248,3 +248,28 @@ pub async fn reject_detection(base: &str, token: &str, id: &str) -> Result<Value
 pub async fn parse_ai(base: &str, token: &str, text: &str) -> Result<Value, String> {
     post_json(base, token, "/api/v1/ai/parse", &json!({ "text": text })).await
 }
+
+pub async fn fetch_body_score(
+    base: &str,
+    token: &str,
+    from_ms: f64,
+    to_ms: f64,
+) -> Result<Option<f64>, String> {
+    let v = Request::get(&format!("{base}/api/v1/metrics/body-battery"))
+        .header("X-EphoriX-Token", token)
+        .query([
+            ("from", iso_from_ms(from_ms).as_str()),
+            ("to", iso_from_ms(to_ms).as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("invalid json: {e}"))?;
+    Ok(v.get("days")
+        .and_then(|d| d.as_array())
+        .and_then(|d| d.last())
+        .and_then(|d| d.get("score"))
+        .and_then(|s| s.as_f64()))
+}
