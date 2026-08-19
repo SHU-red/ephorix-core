@@ -15,6 +15,32 @@
   var charts = new Map();
   var nextId = 1;
 
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  function pad(n) {
+    return (n < 10 ? "0" : "") + n;
+  }
+
+  /* Compact, span-aware x-axis labels (resolves the "__ephorix_time__"
+     sentinel that Rust injects into the opts JSON). */
+  function fmtTime(ms, spanSec) {
+    var d = new Date(ms);
+    if (spanSec <= 36 * 3600) {
+      return pad(d.getHours()) + ":" + pad(d.getMinutes());
+    }
+    if (spanSec <= 45 * 86400) {
+      return MONTHS[d.getMonth()] + " " + d.getDate();
+    }
+    return MONTHS[d.getMonth()] + " '" + String(d.getFullYear()).slice(2);
+  }
+
+  function timeAxisValues(u, splits) {
+    var data = u.data;
+    var xs = data[0];
+    var spanSec = (xs[xs.length - 1] - xs[0]) / 1000;
+    return splits.map(function (t) { return fmtTime(t, spanSec); });
+  }
+
   function create(elId, optsJson, dataJson) {
     var el = document.getElementById(elId);
     if (!el) throw new Error("ephorix-bridge: no element #" + elId);
@@ -29,6 +55,11 @@
         delete s.bars;
       }
     });
+
+    // Compact span-aware time labels (sentinel from Rust opts JSON).
+    if (opts.axes && opts.axes[0] && opts.axes[0].values === "__ephorix_time__") {
+      opts.axes[0].values = timeAxisValues;
+    }
 
     var chart = new uPlot(opts, data, el);
     var id = nextId++;

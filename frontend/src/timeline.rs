@@ -15,7 +15,7 @@ use wasm_bindgen::{closure::Closure, prelude::wasm_bindgen, JsCast};
 
 use crate::api::{fmt_time, ms_from_iso, AgogeSession, AgogeType, TimelinePoint};
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SeriesConfig {
     #[serde(default = "default_true")]
@@ -24,6 +24,16 @@ pub struct SeriesConfig {
     pub steps: bool,
     #[serde(default = "default_true")]
     pub calories: bool,
+}
+
+impl Default for SeriesConfig {
+    fn default() -> Self {
+        Self {
+            heart_rate: true,
+            steps: true,
+            calories: true,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -165,9 +175,9 @@ pub fn TimelineChart(
 fn build_opts(width: i32) -> serde_json::Value {
     json!({
         "width": width,
-        "height": 340,
+        "height": 380,
         "legend": { "show": true, "live": true },
-        "cursor": { "show": true },
+        "cursor": { "show": true, "points": { "show": true } },
         "select": { "show": true, "color": "rgba(229, 57, 53, 0.28)" },
         "scales": {
             "x": { "time": true },
@@ -176,16 +186,24 @@ fn build_opts(width: i32) -> serde_json::Value {
             "y3": { "range": [0, null] }
         },
         "axes": [
-            { "stroke": "#8a8a8a", "grid": { "stroke": "#1c1c1c" } },
-            { "stroke": "#e53935", "grid": { "stroke": "#141414" } },
-            { "stroke": "#5c5c5c", "scale": "y2", "grid": { "show": false } },
-            { "stroke": "#7a7a7a", "scale": "y3", "grid": { "show": false } }
+            { "side": 2, "size": 32, "stroke": "#3a3a3a", "grid": { "stroke": "#161616" },
+              "ticks": { "size": 80 }, "font": "10px 'IBM Plex Mono', monospace",
+              "values": "__ephorix_time__" },
+            { "side": 3, "size": 46, "stroke": "#e53935", "grid": { "stroke": "#141414" },
+              "ticks": { "size": 60 }, "font": "10px 'IBM Plex Mono', monospace" },
+            { "side": 3, "size": 38, "scale": "y2", "stroke": "#4a4a4a", "grid": { "show": false },
+              "ticks": { "size": 70 }, "font": "10px 'IBM Plex Mono', monospace" },
+            { "side": 1, "size": 38, "scale": "y3", "stroke": "#7a3a3a", "grid": { "show": false },
+              "ticks": { "size": 70 }, "font": "10px 'IBM Plex Mono', monospace" }
         ],
         "series": [
             {},
-            { "label": "Heart rate (bpm)", "stroke": "#e53935", "width": 2, "points": { "show": false } },
-            { "label": "Steps", "stroke": "#111111", "fill": "#1a1a1a", "scale": "y2", "bars": true, "points": { "show": false } },
-            { "label": "Active kcal", "stroke": "#9e9e9e", "width": 1.5, "scale": "y3", "points": { "show": false } }
+            { "label": "Heart rate (bpm)", "stroke": "#e53935", "width": 2.5,
+              "fill": "rgba(229, 57, 53, 0.10)", "points": { "show": false } },
+            { "label": "Steps", "stroke": "#8f8f8f", "fill": "rgba(143, 143, 143, 0.14)",
+              "scale": "y2", "bars": true, "points": { "show": false } },
+            { "label": "Active kcal", "stroke": "#ff5252", "width": 1.5, "dash": [6, 4],
+              "scale": "y3", "points": { "show": false } }
         ]
     })
 }

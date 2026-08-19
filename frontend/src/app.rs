@@ -19,6 +19,8 @@ struct StoredSettings {
     range_days: Option<i64>,
 }
 
+/// Time-range presets for the timeline buttons (label, days).
+const RANGES: &[(i64, &str)] = &[(1, "1D"), (7, "1W"), (30, "1M"), (365, "1Y")];
 #[component]
 pub fn App() -> impl IntoView {
     let (token, set_token) = create_signal("ephorix-dev-1".to_string());
@@ -40,6 +42,7 @@ pub fn App() -> impl IntoView {
     let (settings_loaded, set_settings_loaded) = create_signal(false);
     let clear_sel = create_rw_signal(0u32);
     let (editing_type, set_editing_type) = create_signal(None::<String>);
+    let (show_settings, set_show_settings) = create_signal(false);
 
     // Create-form state.
     let (new_type_name, set_new_type_name) = create_signal(String::new());
@@ -190,9 +193,8 @@ pub fn App() -> impl IntoView {
         set_series.set(s);
         persist_settings();
     };
-
-    let set_range = move |ev: web_sys::Event| {
-        set_days.set(event_target_value(&ev).parse().unwrap_or(7));
+    let set_range_days = move |d: i64| {
+        set_days.set(d);
         persist_settings();
     };
 
@@ -269,38 +271,43 @@ pub fn App() -> impl IntoView {
                     <span class="sub">"ΑΓΩΓΗ · TRAINING COMMAND"</span>
                 </div>
                 <div class="controls">
-                    <label class="ctl">
-                        "BASE"
-                        <input
-                            prop:value=base
-                            on:input=move |ev| set_base.set(event_target_value(&ev))
-                            spellcheck="false"
-                            placeholder="SAME-ORIGIN"
-                        />
-                    </label>
-                    <label class="ctl">
-                        "TOKEN"
-                        <input
-                            prop:value=token
-                            on:input=move |ev| set_token.set(event_target_value(&ev))
-                            spellcheck="false"
-                        />
-                    </label>
-                    <label class="ctl">
-                        "RANGE"
-                        <select on:change=set_range>
-                            <option value="1">"1 DAY"</option>
-                            <option value="3">"3 DAYS"</option>
-                            <option value="7" selected>"7 DAYS"</option>
-                            <option value="30">"30 DAYS"</option>
-                        </select>
-                    </label>
                     <button class="btn" on:click=move |_| refresh() prop:disabled=loading>
                         {move || if loading.get() { "LOADING…" } else { "SYNC" }}
+                    </button>
+                    <button class="btn" class:on=move || show_settings.get() on:click=move |_| set_show_settings.update(|v| *v = !*v)>
+                        "SETTINGS"
                     </button>
                 </div>
             </header>
             <div class="meander-rule"></div>
+
+            <Show when=move || show_settings.get() fallback=|| ()>
+                <section class="panel settings-panel">
+                    <div class="panel-head"><h2>"SETTINGS"</h2></div>
+                    <div class="settings-grid">
+                        <label class="ctl">
+                            "API BASE URL"
+                            <input
+                                prop:value=base
+                                on:input=move |ev| set_base.set(event_target_value(&ev))
+                                spellcheck="false"
+                                placeholder="BLANK = SAME-ORIGIN"
+                            />
+                        </label>
+                        <label class="ctl">
+                            "TOKEN"
+                            <input
+                                prop:value=token
+                                on:input=move |ev| set_token.set(event_target_value(&ev))
+                                spellcheck="false"
+                            />
+                        </label>
+                    </div>
+                    <p class="muted" style="margin-top:10px">
+                        "Every /api/v1 call is authorized with the token (X-EphoriX-Token header). Changes apply on the next sync."
+                    </p>
+                </section>
+            </Show>
 
             <Show when=move || error.get().is_some() fallback=|| ()>
                 <div class="banner-error">{move || error.get().unwrap_or_default()}</div>
@@ -310,16 +317,40 @@ pub fn App() -> impl IntoView {
                 <section class="panel">
                     <div class="panel-head">
                         <h2>"RAW METRICS / AGOGE OVERLAY"</h2>
-                        <span class="muted">
-                            {move || {
-                                let pts = points.get();
-                                let kcal = pts.iter().filter_map(|p| p.active_calories).sum::<f64>();
-                                if pts.is_empty() {
-                                    "no data".to_string()
-                                } else {
-                                    format!("{} buckets · {:.0} kcal · {}", pts.len(), kcal, bucket_info.get())
+                        <div class="range-buttons">
+                            {RANGES.iter().map(|(d, label)| {
+                                let d = *d;
+                                view! {
+                                    <button class="pill" class:on=move || days.get() == d on:click=move |_| set_range_days(d)>{*label}</button>
                                 }
-                            }}
+                            }).collect_view()}
+                        </div>
+                    </div>
+                    <div class="stats-line">
+                        {move || {
+                            let pts = points.get();
+                            let kcal = pts.iter().filter_map(|p| p.active_calories).sum::<f64>();
+                            if pts.is_empty() {
+                                "no data".to_string()
+                            } else {
+                                format!("{} buckets · {:.0} kcal · {}", pts.len(), kcal, bucket_info.get())
+                            }
+                        }}
+                    </div>
+                    <div class="series-toggles">
+                        <span class="muted">"METRICS"</span>
+                        <button class="pill" class:on=move || series.get().heart_rate class:off=move || !series.get().heart_rate on:click=move |_| toggle_series("heartRate")>
+                            <span class="dot dot-hr"></span>"HR"
+                        </button>
+                        <button class="pill" class:on=move || series.get().steps class:off=move || !series.get().steps on:click=move |_| toggle_series("steps")>
+                            <span class="dot dot-steps"></span>"STEPS"
+                        </button>
+                        <button class="pill" class:on=move || series.get().calories class:off=move || !series.get().calories on:click=move |_| toggle_series("calories")>
+                            <span class="dot dot-kcal"></span>"KCAL"
+                        </button>
+                        <span class="muted cursor-readout">
+                            "CURSOR "
+                            {move || cursor.get().map(fmt_time).unwrap_or_else(|| "—".to_string())}
                         </span>
                     </div>
                     <TimelineChart
@@ -361,28 +392,6 @@ pub fn App() -> impl IntoView {
                                     format!("{} → {}", fmt_time(f.min(t)), fmt_time(f.max(t)))
                                 }).unwrap_or_else(|| "—".to_string())
                             }}
-                        </span>
-                    </div>
-                    <div class="series-toggles">
-                        <span class="muted">"SHOW:"</span>
-                        <label class="chk">
-                            <input type="checkbox" prop:checked=move || series.get().heart_rate
-                                on:change=move |_| toggle_series("heartRate") />
-                            "HEART RATE"
-                        </label>
-                        <label class="chk">
-                            <input type="checkbox" prop:checked=move || series.get().steps
-                                on:change=move |_| toggle_series("steps") />
-                            "STEPS"
-                        </label>
-                        <label class="chk">
-                            <input type="checkbox" prop:checked=move || series.get().calories
-                                on:change=move |_| toggle_series("calories") />
-                            "ACTIVE KCAL"
-                        </label>
-                        <span class="muted cursor-readout">
-                            "CURSOR: "
-                            {move || cursor.get().map(fmt_time).unwrap_or_else(|| "—".to_string())}
                         </span>
                     </div>
                 </section>
