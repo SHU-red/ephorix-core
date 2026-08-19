@@ -565,7 +565,10 @@ pub fn App() -> impl IntoView {
             <header class="header">
                 <div class="brand">
                     <div class="brand-row">
-                        <h1><span>"Σρη"</span><span class="mark-o" inner_html=MARK></span><span>"τιΧ"</span></h1>
+                        <h1>
+                            <span class="wm-gr"><span>"Σρη"</span><span class="mark-o" inner_html=MARK></span><span>"τιΧ"</span></span>
+                            <span class="wm-en"><span>"Eph"</span><span class="mark-o" inner_html=MARK></span><span>"riX"</span></span>
+                        </h1>
                     </div>
                     <span class="sub">"ΑΓΩΓΗ · TRAINING COMMAND"</span>
                 </div>

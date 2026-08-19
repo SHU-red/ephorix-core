@@ -107,7 +107,11 @@ h1, h2, h3 {
   position: relative;
   z-index: 1;
   letter-spacing: 0.06em;
+  text-transform: none; /* keep mixed-case Greek (Σ ρ η τ ι Χ) verbatim */
 }
+.brand h1 .wm-en { display: none; }
+.brand h1:hover .wm-gr { display: none; }
+.brand h1:hover .wm-en { display: inline; }
 .brand .sub {
   color: var(--muted);
   letter-spacing: 0.42em;
