@@ -564,7 +564,6 @@ pub fn App() -> impl IntoView {
     let toggle_zoom_mode = move |_| set_zoom_mode.update(|v| *v = !*v);
     let do_reset_zoom = move |_| reset_zoom.set(reset_zoom.get() + 1);
     // -----------------------------------------------------------------------
-
     view! {
         <div class="app">
             <header class="header">
@@ -577,7 +576,7 @@ pub fn App() -> impl IntoView {
                     </div>
                     <span class="sub">"ΑΓΩΓΗ · TRAINING COMMAND"</span>
                 </div>
-                <img class="brand-helmet" src="/assets/helmet_transparent.png" alt="Spartan helmet" />
+                <img class="brand-helmet" src="/assets/spartan_banner.png" alt="Spartan banner" />
             </header>
 
             <nav class="tabs">
