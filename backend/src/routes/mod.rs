@@ -2,6 +2,9 @@ pub mod agoge_sessions;
 pub mod agoge_types;
 pub mod events;
 pub mod health;
+pub mod ingest;
+pub mod metrics;
+pub mod nutrition;
 pub mod settings;
 pub mod timeline;
 
@@ -69,6 +72,17 @@ pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
             "/api/v1/settings",
             get(settings::get_settings).put(settings::put_settings),
         )
+        .route("/api/v1/ingest", post(ingest::ingest))
+        .route("/api/v1/measurements", get(ingest::list_measurements))
+        .route(
+            "/api/v1/nutrition",
+            get(nutrition::list_nutrition).post(nutrition::add_nutrition),
+        )
+        .route(
+            "/api/v1/metrics/body-battery",
+            get(metrics::body_battery),
+        )
+        .route("/api/v1/metrics/workouts", get(metrics::workouts))
         .route_layer(middleware::from_fn_with_state(pool.clone(), auth::require_auth));
 
     Router::new()

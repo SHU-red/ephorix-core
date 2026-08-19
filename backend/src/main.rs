@@ -7,6 +7,7 @@ mod auth;
 mod config;
 mod error;
 mod models;
+mod normalize;
 mod routes;
 
 #[tokio::main]
