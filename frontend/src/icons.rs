@@ -69,6 +69,13 @@ pub const SHIELD: &str = concat!(
     r##"<path d="M12 2.5 C 18 4.5, 21.5 9.5, 21.5 13.5 C 21.5 18.5, 17.5 22, 12 23 C 6.5 22, 2.5 18.5, 2.5 13.5 C 2.5 9.5, 6 4.5, 12 2.5 Z"/>"##,
     r##"</svg>"##,
 );
+/// The brand mark: the aspis (round shield) with the Lakedaimonian lambda.
+pub const LOGO: &str = concat!(
+    r##"<svg viewBox="0 0 100 100" fill="none" stroke="#E53935">"##,
+    r##"<path d="M50 5 C75 13 93 34 93 55 C93 80 74 93 50 98 C26 93 7 80 7 55 C7 34 25 13 50 5 Z" stroke-width="4"/>"##,
+    r##"<path d="M35 30 L50 70 L65 30" stroke-width="8" stroke-linecap="square" stroke-linejoin="miter"/>"##,
+    r##"</svg>"##,
+);
 
 /// Six-spoke Spartan wheel.
 pub const WHEEL: &str = concat!(
