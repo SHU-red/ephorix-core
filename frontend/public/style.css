@@ -91,17 +91,14 @@ h1, h2, h3 {
 }
 
 
-.brand-row { display: flex; align-items: center; gap: 16px; }
+.brand-row { display: flex; align-items: center; }
 
-.brand-logo {
-  width: 64px;
-  height: 64px;
-  display: inline-flex;
-  flex: 0 0 auto;
-  filter: drop-shadow(0 0 14px rgba(229, 57, 53, 0.4));
+/* Helmet: same height as the EPHORIX text (96px), on the right of the top area. */
+.brand-helmet {
+  height: 96px;
+  width: auto;
+  filter: drop-shadow(0 0 16px rgba(229, 57, 53, 0.3));
 }
-.brand-logo svg { width: 100%; height: 100%; }
-
 .brand h1 {
   font-size: 96px;
   line-height: 1;
@@ -321,7 +318,14 @@ select { min-width: 120px; }
 
 /* ---------------- Tabs ---------------- */
 
-.tabs { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 10px 0 6px; }
+.tabs {
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  padding: 10px 0 8px;
+  position: sticky; top: 0; z-index: 40;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: -2px;
+}
 .tab {
   background: #030303; color: var(--muted);
   border: 1px solid var(--line); padding: 7px 12px;
