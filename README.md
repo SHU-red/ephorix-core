@@ -107,6 +107,26 @@ builds locally from the repo when you want that.
 
 The timescaledb database image is upstream and not CI-built.
 
+### Publishing manually (build locally, push to GHCR)
+
+Prefer building on your own machine when you want to see failures and
+smoke-test before anything reaches the registry:
+
+```bash
+docker login ghcr.io -u <user> -p <PAT>   # PAT scope: write:packages
+./scripts/publish.sh                      # dev build: dev + dev-<sha>
+./scripts/publish.sh --no-push            # build + tag only, smoke-test first
+./scripts/publish.sh v1.2.3               # release: latest + v1.2.3 + 1.2 + <sha>
+```
+
+`scripts/publish.sh` applies the same tagging scheme as the CI workflow.
+The frontend image build takes a few minutes (it installs trunk +
+wasm-bindgen-cli inside the builder). Equivalent one-liner via compose:
+
+```bash
+EPHORIX_TAG=dev docker compose build && EPHORIX_TAG=dev docker compose push
+```
+
 ## Deploying to a server
 
 The watch does **not** need the frontend — it talks to the API on the same
