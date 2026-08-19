@@ -5,14 +5,16 @@ red; raw sensor metrics and discrete Agoge events are kept separate.
 
 ```
 ephorix-core/
-├── docker-compose.yml          # TimescaleDB + API
+├── docker-compose.yml          # one port (web :9000), one volume (db), api internal
+├── docker-compose.dev.yml      # dev override: exposes db for local cargo run
 ├── backend/                    # Rust: axum + sqlx
-│   ├── migrations/             # schema + seed (hypertable, users, types)
+│   ├── migrations/             # schema + seed (hypertable, users, types, settings)
 │   ├── src/
 │   │   ├── auth.rs             # X-EphoriX-Token middleware (multi-user ready)
-│   │   └── routes/             # health, events, agoge-types, agoge-sessions, timeline
+│   │   └── routes/             # health, events, agoge-types, sessions, timeline, settings
 │   └── Dockerfile
 ├── frontend/                   # Leptos (CSR) + uPlot, served by trunk
+├── scripts/publish.sh          # build images locally, push to GHCR
 └── docs/api-contract.md        # JSON payload contract (PebbleKit JS ↔ backend)
 ```
 
@@ -21,14 +23,21 @@ ephorix-core/
 - **Stateless & event-driven.** `Raw_Health_Data` is a TimescaleDB hypertable
   (`timestamp`, `user_id`, `heart_rate`, `steps`, `active_calories`). Agoge
   sessions are derived from Start/Stop marker events (`agoge_markers`) but
-  remain manually editable. Raw data is never locked to sessions — the UI
-  joins them by time range at query time, so ML can retro-analyze the raw
-  stream (reps, rest periods, workout detection).
+  remain manually editable. `pause`/`resume` markers record rest periods
+  inside an open session without closing it. Raw data is never locked to
+  sessions — the UI joins them by time range at query time, so ML can
+  retro-analyze the raw stream (reps, rest periods, workout detection).
 - **Offline-first.** PebbleKit JS queues payloads in `localStorage` and flushes
-  with exponential backoff on reconnect (see `ephorix-pebble`).
+  with exponential backoff on reconnect. Permanent client errors (4xx) are
+  dead-lettered so a stale item can never block the queue. The watch sends
+  health snapshots only per its Auto Push mode (battery discipline) — see
+  `ephorix-pebble`.
 - **Multi-user.** POC uses fixed tokens (`ephorix-dev-1`, `ephorix-dev-2`)
   resolved against `users`; every query is scoped by the authenticated
   `user_id`. Swapping in real auth touches only `auth.rs`.
+- **One volume, everything in the DB.** All state — raw metrics, sessions,
+  markers, Agoge types, and per-user UI settings (`user_settings` JSONB) —
+  lives in the database volume. No second persistent mount.
 
 ## Run
 
@@ -76,8 +85,24 @@ trunk serve --proxy-backend http://localhost:3000
 The UI defaults to same-origin API calls (BASE field empty): in dev, trunk
 forwards `/api/*` to the backend via `--proxy-backend`; in production, nginx
 does the same. Type a full URL in the BASE field to override (e.g. direct
-API access without a proxy). Drag on the timeline to select a range →
-"CREATE SESSION FROM SELECTION"; hover to a time → "CLOSE OPEN AT CURSOR".
+API access without a proxy).
+
+## Web UI
+
+- **Timeline**: heart rate, steps and active-kcal series with a legend;
+  every series can be toggled on/off. Downsampled server-side
+  (`time_bucket`), so long ranges stay fluid.
+- **Region selection**: drag on the plot → the range is shown, then
+  "CREATE SESSION FROM SELECTION" (with a chosen Agoge type) or
+  "CLEAR SELECTION". "CLOSE OPEN AT CURSOR" closes the open session at the
+  hovered time.
+- **Agoge sessions**: list with type/status/times, delete.
+- **Agoge types**: create and edit — name, color picker, emoji icon set.
+  Renames/deletes never break sessions (referenced by id; missing types
+  render as *Undefined*).
+- **Settings live in the DB**: series visibility and the timeline range are
+  stored per user (`/api/v1/settings`, `user_settings` table) — the web app
+  needs no volume of its own.
 
 ## Images (GHCR, built locally)
 
@@ -119,7 +144,13 @@ The timescaledb database image is upstream and never built.
 ## Deploying to a server
 
 The watch does **not** need the frontend — it talks to the API on the same
-port. Production stack: `docker compose up --build -d` behind TLS.
+port. Production stack (no toolchain on the box — images come from GHCR):
+
+```bash
+# .env: EPHORIX_TAG=latest, EPHORIX_PG_VOLUME=..., EPHORIX_WEB_PORT=9000
+docker compose pull
+docker compose up -d
+```
 
 1. **Rotate the seeded tokens.** `0002_seed.sql` ships dev tokens
    (`ephorix-dev-1`, `ephorix-dev-2`). Add real users on the box:
@@ -135,8 +166,10 @@ port. Production stack: `docker compose up --build -d` behind TLS.
    reachable from outside the stack (db and api have no host ports).
 3. **TLS in front.** The web service is plain HTTP; put Caddy/nginx in front
    (Caddy: `reverse_proxy 127.0.0.1:9000` + your domain).
-4. **Backup** `EPHORIX_PG_VOLUME` (or the bind-mount path). The hypertable
-   and all data live there — it is the only state in the stack.
+4. **Backup** `EPHORIX_PG_VOLUME` (or the bind-mount path). The hypertable,
+   sessions, types and settings all live there — it is the only state in the
+   stack. On RHEL/Fedora SELinux hosts use `EPHORIX_VOLUME_MODE=z` (or `Z`)
+   for bind mounts.
 
 ## Verify
 
@@ -152,7 +185,8 @@ cd backend && cargo test    # bucket validation unit tests
   them unchanged.
 - Timeline bucket guard caps responses at 2000 points; the client picks a
   bucket yielding ≤ 800.
-- PebbleKit JS config page lets you set the backend base URL (persisted in
-  `localStorage`).
+- The watch stores its backend URL/token on the phone (Pebble config page,
+  `localStorage`); its Auto Push mode is persisted on the watch itself.
 - Auth is the documented dummy-token scheme; swap `auth.rs` for real auth
   without touching the data layer.
+- Day-to-day development: see `DEVELOPMENT.md`.

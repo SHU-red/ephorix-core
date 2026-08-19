@@ -1,0 +1,7 @@
+# Dev-only override: exposes the internal database to the host so local
+# `cargo run` can reach it. NEVER use this in production.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d db
+services:
+  db:
+    ports:
+      - "5432:5432"
