@@ -566,8 +566,8 @@ pub fn App() -> impl IntoView {
                 <div class="brand">
                     <div class="brand-row">
                         <h1>
-                            <span class="wm-gr"><span>"Σρη"</span><span class="mark-o" inner_html=MARK></span><span>"τιΧ"</span></span>
-                            <span class="wm-en"><span>"Eph"</span><span class="mark-o" inner_html=MARK></span><span>"riX"</span></span>
+                            <span class="wm-latin"><span>"Eph"</span><span class="mark-o" inner_html=MARK></span><span>"riX"</span></span>
+                            <span class="wm-greek"><span>"Σρη"</span><span class="mark-o" inner_html=MARK></span><span>"τιΧ"</span></span>
                         </h1>
                     </div>
                     <span class="sub">"ΑΓΩΓΗ · TRAINING COMMAND"</span>
