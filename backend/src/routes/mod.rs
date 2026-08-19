@@ -1,5 +1,6 @@
 pub mod agoge_sessions;
 pub mod agoge_types;
+pub mod ai;
 pub mod events;
 pub mod health;
 pub mod ingest;
@@ -83,6 +84,15 @@ pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
             get(metrics::body_battery),
         )
         .route("/api/v1/metrics/workouts", get(metrics::workouts))
+        .route(
+            "/api/v1/metrics/workouts/{id}/accept",
+            post(metrics::accept_detection),
+        )
+        .route(
+            "/api/v1/metrics/workouts/{id}/reject",
+            post(metrics::reject_detection),
+        )
+        .route("/api/v1/ai/parse", post(ai::parse))
         .route_layer(middleware::from_fn_with_state(pool.clone(), auth::require_auth));
 
     Router::new()

@@ -38,6 +38,23 @@ pub struct TimelinePoint {
     pub active_calories: Option<f64>,
 }
 
+#[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct NutritionEvent {
+    pub ts: f64, // epoch ms
+    pub kind: String,
+    pub amount: f64,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct SleepDay {
+    pub ts: f64, // epoch ms of the day start (UTC)
+    pub sleep_seconds: f64,
+    pub restful_seconds: f64,
+}
+
 pub async fn get_timeline(
     State(pool): State<PgPool>,
     Extension(user): Extension<AuthUser>,
@@ -86,10 +103,45 @@ pub async fn get_timeline(
     .fetch_all(&pool)
     .await?;
 
+    // Nutrition events (meals / water) for overlay markers.
+    let nutrition: Vec<NutritionEvent> = sqlx::query_as(
+        "SELECT
+            (EXTRACT(EPOCH FROM consumed_at) * 1000)::float8 AS ts,
+            kind, amount, note
+         FROM nutrition_log
+         WHERE user_id = $1 AND consumed_at >= $2 AND consumed_at < $3
+         ORDER BY consumed_at",
+    )
+    .bind(user.0)
+    .bind(q.from)
+    .bind(q.to)
+    .fetch_all(&pool)
+    .await?;
+
+    // Daily sleep totals (sleep is a daily sum; the client renders night bands).
+    let sleep: Vec<SleepDay> = sqlx::query_as(
+        "SELECT
+            (EXTRACT(EPOCH FROM date_trunc('day', ts)) * 1000)::float8 AS ts,
+            COALESCE(SUM(value) FILTER (WHERE metric = 'sleep_seconds'), 0)::float8 AS sleep_seconds,
+            COALESCE(SUM(value) FILTER (WHERE metric = 'restful_sleep_seconds'), 0)::float8 AS restful_seconds
+         FROM measurements
+         WHERE user_id = $1 AND ts >= $2 AND ts < $3
+           AND metric IN ('sleep_seconds', 'restful_sleep_seconds')
+         GROUP BY 1
+         ORDER BY 1",
+    )
+    .bind(user.0)
+    .bind(q.from)
+    .bind(q.to)
+    .fetch_all(&pool)
+    .await?;
+
     Ok(Json(json!({
         "bucket": bucket,
         "points": points,
         "sessions": sessions,
+        "nutrition": nutrition,
+        "sleep": sleep,
     })))
 }
 
