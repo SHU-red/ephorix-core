@@ -41,8 +41,17 @@ pub fn App() -> impl IntoView {
     let (series, set_series) = create_signal(SeriesConfig::default());
     let (settings_loaded, set_settings_loaded) = create_signal(false);
     let clear_sel = create_rw_signal(0u32);
+    let reset_zoom = create_rw_signal(0u32);
     let (editing_type, set_editing_type) = create_signal(None::<String>);
     let (show_settings, set_show_settings) = create_signal(false);
+    let (nutrition, set_nutrition) = create_signal(Vec::<NutritionEvent>::new());
+    let (sleep, set_sleep) = create_signal(Vec::<SleepDay>::new());
+    let (detections, set_detections) = create_signal(Vec::<Detection>::new());
+    let (zoom_mode, set_zoom_mode) = create_signal(true);
+    let (ai_text, set_ai_text) = create_signal(String::new());
+    let (ai_base, set_ai_base) = create_signal(String::new());
+    let (ai_model, set_ai_model) = create_signal(String::new());
+    let (ai_key, set_ai_key) = create_signal(String::new());
 
     // Create-form state.
     let (new_type_name, set_new_type_name) = create_signal(String::new());
@@ -55,10 +64,12 @@ pub fn App() -> impl IntoView {
         let token = token.get();
         let s = series.get();
         let d = days.get();
+        let ai = json!({ "baseUrl": ai_base.get(), "model": ai_model.get(), "apiKey": ai_key.get() });
         spawn_local(async move {
             let body = json!({
                 "series": s,
                 "rangeDays": d,
+                "aiProvider": ai,
             });
             let _ = put_settings(&base, &token, &body).await;
         });
@@ -81,6 +92,8 @@ pub fn App() -> impl IntoView {
                     set_bucket_info.set(format!("bucket: {}", tt.bucket));
                     set_points.set(tt.points);
                     set_sessions.set(tt.sessions);
+                    set_nutrition.set(tt.nutrition);
+                    set_sleep.set(tt.sleep);
                 }
                 Err(e) => set_error.set(Some(e)),
             }
@@ -88,18 +101,27 @@ pub fn App() -> impl IntoView {
                 Ok(t) => set_types.set(t),
                 Err(e) => set_error.set(Some(e)),
             }
+            match fetch_workouts(&base, &token, from_ms, to_ms).await {
+                Ok(d) => set_detections.set(d),
+                Err(e) => set_error.set(Some(e)),
+            }
             // Settings load once per session (do not clobber user changes).
             if !loaded {
                 if let Ok(sv) = fetch_settings(&base, &token).await {
-                    if let Ok(stored) = serde_json::from_value::<StoredSettings>(sv) {
+                    if let Ok(stored) = serde_json::from_value::<StoredSettings>(sv.clone()) {
                         if let Some(sc) = stored.series {
                             set_series.set(sc);
                         }
                         if let Some(rd) = stored.range_days {
                             set_days.set(rd);
                         }
-                        set_settings_loaded.set(true);
                     }
+                    if let Some(ai) = sv.get("aiProvider") {
+                        set_ai_base.set(ai.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("").to_string());
+                        set_ai_model.set(ai.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string());
+                        set_ai_key.set(ai.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").to_string());
+                    }
+                    set_settings_loaded.set(true);
                 }
             }
             set_loading.set(false);
@@ -258,6 +280,62 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let accept_det = move |id: String| {
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            match accept_detection(&base, &token, &id).await {
+                Ok(_) => refresh(),
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    };
+
+    let reject_det = move |id: String| {
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            match reject_detection(&base, &token, &id).await {
+                Ok(_) => refresh(),
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    };
+
+    // AI-assisted nutrition entry: describe a meal/drink -> parse -> log.
+    let ai_submit = move |_| {
+        let text = ai_text.get().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let base = base.get();
+        let token = token.get();
+        set_error.set(None);
+        spawn_local(async move {
+            match parse_ai(&base, &token, &text).await {
+                Ok(p) => {
+                    let kind = p.get("kind").and_then(|v| v.as_str()).unwrap_or("food");
+                    let amount = p.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let body = json!({
+                        "kind": kind,
+                        "amount": amount,
+                        "consumedAt": iso_from_ms(js_sys::Date::now()),
+                        "note": text,
+                    });
+                    if let Err(e) = post_json(&base, &token, "/api/v1/nutrition", &body).await {
+                        set_error.set(Some(e));
+                    }
+                    set_ai_text.set(String::new());
+                    refresh();
+                }
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    };
+
+    let toggle_zoom_mode = move |_| set_zoom_mode.update(|v| *v = !*v);
+    let do_reset_zoom = move |_| reset_zoom.set(reset_zoom.get() + 1);
+
     // -----------------------------------------------------------------------
 
     view! {
@@ -303,8 +381,51 @@ pub fn App() -> impl IntoView {
                             />
                         </label>
                     </div>
+                    <div class="panel-head" style="margin-top:18px"><h2>"AI PROVIDER (LOCAL OR REMOTE)"</h2></div>
+                    <div class="settings-grid">
+                        <label class="ctl">
+                            "BASE URL (CHAT COMPLETIONS)"
+                            <input
+                                prop:value=ai_base
+                                on:input=move |ev| set_ai_base.set(event_target_value(&ev))
+                                spellcheck="false"
+                                placeholder="http://localhost:11434/v1"
+                            />
+                        </label>
+                        <label class="ctl">
+                            "MODEL"
+                            <input
+                                prop:value=ai_model
+                                on:input=move |ev| set_ai_model.set(event_target_value(&ev))
+                                spellcheck="false"
+                                placeholder="llama3"
+                            />
+                        </label>
+                        <label class="ctl">
+                            "API KEY"
+                            <input
+                                prop:value=ai_key
+                                on:input=move |ev| set_ai_key.set(event_target_value(&ev))
+                                spellcheck="false"
+                                placeholder="(blank for local)"
+                            />
+                        </label>
+                    </div>
+                    <div class="settings-grid" style="margin-top:12px">
+                        <label class="ctl">
+                            "DESCRIBE A MEAL / DRINK"
+                            <input
+                                prop:value=ai_text
+                                on:input=move |ev| set_ai_text.set(event_target_value(&ev))
+                                spellcheck="false"
+                                placeholder="two eggs and a slice of toast"
+                            />
+                        </label>
+                        <button class="btn" on:click=ai_submit>"AI LOG"</button>
+                        <button class="btn" on:click=move |_| persist_settings()>"SAVE"</button>
+                    </div>
                     <p class="muted" style="margin-top:10px">
-                        "Every /api/v1 call is authorized with the token (X-EphoriX-Token header). Changes apply on the next sync."
+                        "AI LOG sends the description to the provider, which returns kcal (food) or ml (water); it is logged to your nutrition. Local providers (Ollama, LM Studio, llama.cpp) and remote OpenAI-compatible endpoints use the same URL+model."
                     </p>
                 </section>
             </Show>
@@ -357,12 +478,22 @@ pub fn App() -> impl IntoView {
                         points=points
                         sessions=sessions
                         types=types
+                        nutrition=nutrition
+                        sleep=sleep
                         series=series
                         selection=set_selection
                         cursor=set_cursor
+                        zoom_mode=zoom_mode
                         clear_trigger=clear_sel
+                        reset_zoom=reset_zoom
                     />
                     <div class="timeline-actions">
+                        <button class="btn" class:on=move || !zoom_mode.get() on:click=toggle_zoom_mode>
+                            {move || if zoom_mode.get() { "DRAG = ZOOM" } else { "DRAG = SELECT" }}
+                        </button>
+                        <button class="btn" on:click=do_reset_zoom>
+                            "RESET ZOOM"
+                        </button>
                         <button class="btn" on:click=create_from_selection>
                             "CREATE SESSION FROM SELECTION"
                         </button>
@@ -394,6 +525,49 @@ pub fn App() -> impl IntoView {
                             }}
                         </span>
                     </div>
+                </section>
+
+                <section class="panel">
+                    <div class="panel-head">
+                        <h2>"DETECTED ACTIVITIES"</h2>
+                        <span class="muted">
+                            {move || {
+                                let p = detections.get().iter().filter(|d| d.status == "proposed").count();
+                                format!("{p} proposed · accept or reject")
+                            }}
+                        </span>
+                    </div>
+                    <Show
+                        when=move || detections.get().iter().any(|d| d.status == "proposed")
+                        fallback=|| view! { <p class="muted">"No proposed activities in this range. Train with the watch or ingest data and they will surface here."</p> }
+                    >
+                        <ul class="list detections">
+                            <For
+                                each=move || detections.get().into_iter().filter(|d| d.status == "proposed")
+                                key=|d| d.id.clone()
+                                let:d
+                            >
+                                {move || {
+                                    let label = format!(
+                                        "{} · {} – {} · peak {} bpm",
+                                        d.proposed_type_name.clone().unwrap_or_else(|| "Activity".to_string()),
+                                        fmt_time(d.start),
+                                        fmt_time(d.end),
+                                        d.peak_hr as i64
+                                    );
+                                    let aid = d.id.clone();
+                                    let rid = d.id.clone();
+                                    view! {
+                                        <li class="row detection-row">
+                                            <span class="row-name">{label}</span>
+                                            <button class="btn small" on:click=move |_| accept_det(aid.clone())>"ACCEPT"</button>
+                                            <button class="btn small" on:click=move |_| reject_det(rid.clone())>"REJECT"</button>
+                                        </li>
+                                    }
+                                }}
+                            </For>
+                        </ul>
+                    </Show>
                 </section>
 
                 <div class="lower">

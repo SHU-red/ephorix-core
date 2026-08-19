@@ -36,11 +36,45 @@ pub struct TimelinePoint {
     pub active_calories: Option<f64>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NutritionEvent {
+    pub ts: f64,
+    pub kind: String,
+    pub amount: f64,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SleepDay {
+    pub ts: f64,
+    pub sleep_seconds: f64,
+    pub restful_seconds: f64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TimelineResponse {
     pub bucket: String,
     pub points: Vec<TimelinePoint>,
     pub sessions: Vec<AgogeSession>,
+    #[serde(default)]
+    pub nutrition: Vec<NutritionEvent>,
+    #[serde(default)]
+    pub sleep: Vec<SleepDay>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Detection {
+    pub id: String,
+    pub start: f64,
+    pub end: f64,
+    pub peak_hr: f64,
+    pub confidence: f64,
+    pub status: String,
+    pub proposed_type_id: Option<String>,
+    pub proposed_type_name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -180,4 +214,37 @@ pub async fn delete_json(base: &str, token: &str, path: &str) -> Result<Value, S
         .await
         .map_err(|e| format!("request failed: {e}"))?;
     check(resp).await
+}
+
+pub async fn fetch_workouts(
+    base: &str,
+    token: &str,
+    from_ms: f64,
+    to_ms: f64,
+) -> Result<Vec<Detection>, String> {
+    let v = Request::get(&format!("{base}/api/v1/metrics/workouts"))
+        .header("X-EphoriX-Token", token)
+        .query([
+            ("from", iso_from_ms(from_ms).as_str()),
+            ("to", iso_from_ms(to_ms).as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("invalid json: {e}"))?;
+    serde_json::from_value(v["detections"].clone()).map_err(|e| format!("detections decode: {e}"))
+}
+
+pub async fn accept_detection(base: &str, token: &str, id: &str) -> Result<Value, String> {
+    post_json(base, token, &format!("/api/v1/metrics/workouts/{id}/accept"), &json!({})).await
+}
+
+pub async fn reject_detection(base: &str, token: &str, id: &str) -> Result<Value, String> {
+    post_json(base, token, &format!("/api/v1/metrics/workouts/{id}/reject"), &json!({})).await
+}
+
+pub async fn parse_ai(base: &str, token: &str, text: &str) -> Result<Value, String> {
+    post_json(base, token, "/api/v1/ai/parse", &json!({ "text": text })).await
 }

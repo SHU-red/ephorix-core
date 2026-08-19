@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use wasm_bindgen::{closure::Closure, prelude::wasm_bindgen, JsCast};
 
-use crate::api::{fmt_time, ms_from_iso, AgogeSession, AgogeType, TimelinePoint};
+use crate::api::{fmt_time, ms_from_iso, AgogeSession, AgogeType, NutritionEvent, SleepDay, TimelinePoint};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,8 +50,10 @@ extern "C" {
     fn ephorix_set_data(id: u32, data_json: &str);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = setSeriesShow)]
     fn ephorix_set_series_show(id: u32, series_idx: u32, show: bool);
-    #[wasm_bindgen(js_namespace = EphoriX, js_name = onSelect)]
-    fn ephorix_on_select(id: u32, cb: &js_sys::Function);
+    #[wasm_bindgen(js_namespace = EphoriX, js_name = onDrag)]
+    fn ephorix_on_drag(id: u32, cb: &js_sys::Function);
+    #[wasm_bindgen(js_namespace = EphoriX, js_name = zoomTo)]
+    fn ephorix_zoom_to(id: u32, x0: f64, x1: f64, y0: f64, y1: f64, dir: &str);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = onCursor)]
     fn ephorix_on_cursor(id: u32, cb: &js_sys::Function);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = valToPos)]
@@ -60,6 +62,8 @@ extern "C" {
     fn ephorix_plot_bbox(id: u32) -> String;
     #[wasm_bindgen(js_namespace = EphoriX, js_name = clearSelection)]
     fn ephorix_clear_selection(id: u32);
+    #[wasm_bindgen(js_namespace = EphoriX, js_name = resetZoom)]
+    fn ephorix_reset_zoom(id: u32);
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,15 +74,28 @@ struct BBox {
     height: f64,
 }
 
+#[derive(Debug, Deserialize)]
+struct DragRect {
+    x0: f64,
+    x1: f64,
+    y0: f64,
+    y1: f64,
+    dir: String,
+}
+
 #[component]
 pub fn TimelineChart(
     points: ReadSignal<Vec<TimelinePoint>>,
     sessions: ReadSignal<Vec<AgogeSession>>,
     types: ReadSignal<Vec<AgogeType>>,
+    nutrition: ReadSignal<Vec<NutritionEvent>>,
+    sleep: ReadSignal<Vec<SleepDay>>,
     series: ReadSignal<SeriesConfig>,
     selection: WriteSignal<Option<(f64, f64)>>,
     cursor: WriteSignal<Option<f64>>,
+    zoom_mode: ReadSignal<bool>,
     clear_trigger: RwSignal<u32>,
+    reset_zoom: RwSignal<u32>,
 ) -> impl IntoView {
     let chart_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let overlay_ref: NodeRef<leptos::html::Div> = create_node_ref();
@@ -93,6 +110,14 @@ pub fn TimelineChart(
         }
     });
 
+    // Reset all axes on demand (bumped by the RESET ZOOM button / range change).
+    create_effect(move |_| {
+        let _ = reset_zoom.get();
+        let id = chart_id.get();
+        if id != 0 {
+            ephorix_reset_zoom(id);
+        }
+    });
     // One-time chart creation once the div is mounted. `get_untracked` keeps
     // data updates from re-creating the chart.
     create_effect(move |_| {
@@ -107,11 +132,16 @@ pub fn TimelineChart(
             );
             chart_id.set(id);
 
-            let sel_cb = Closure::wrap(Box::new(move |from: f64, to: f64| {
-                selection.set(Some((from, to)));
-            }) as Box<dyn FnMut(f64, f64)>);
-            ephorix_on_select(id, sel_cb.as_ref().unchecked_ref());
-            sel_cb.forget();
+            let drag_cb = Closure::wrap(Box::new(move |json: String| {
+                let Ok(r) = serde_json::from_str::<DragRect>(&json) else { return };
+                if zoom_mode.get_untracked() {
+                    ephorix_zoom_to(id, r.x0, r.x1, r.y0, r.y1, &r.dir);
+                } else {
+                    selection.set(Some((r.x0, r.x1)));
+                }
+            }) as Box<dyn FnMut(String)>);
+            ephorix_on_drag(id, drag_cb.as_ref().unchecked_ref());
+            drag_cb.forget();
 
             let cur_cb = Closure::wrap(Box::new(move |ts: Option<f64>| {
                 cursor.set(ts);
@@ -143,8 +173,8 @@ pub fn TimelineChart(
         ephorix_set_series_show(id, 3, s.calories);
     });
 
-    // Re-render the session overlay (absolute-positioned bars) when sessions
-    // or types change.
+    // Re-render the overlay (session bars + sleep bands + nutrition markers)
+    // when any of its inputs change.
     create_effect(move |_| {
         let id = chart_id.get();
         if id == 0 {
@@ -152,9 +182,11 @@ pub fn TimelineChart(
         }
         let sess = sessions.get();
         let types = types.get();
-        let _ = points.get(); // re-render bars once raw data is charted
+        let nut = nutrition.get();
+        let slp = sleep.get();
+        let _ = points.get(); // re-render once raw data is charted
         if let Some(overlay) = overlay_ref.get() {
-            render_overlay(&overlay, id, &sess, &types);
+            render_overlay(&overlay, id, &sess, &types, &nut, &slp);
         }
     });
 
@@ -222,6 +254,8 @@ fn render_overlay(
     chart_id: u32,
     sessions: &[AgogeSession],
     types: &[AgogeType],
+    nutrition: &[NutritionEvent],
+    sleep: &[SleepDay],
 ) {
     let doc = web_sys::window().unwrap().document().unwrap();
     container.set_attribute("style", "").ok();
@@ -264,6 +298,52 @@ fn render_overlay(
         let _ = el.set_attribute(
             "style",
             &format!("position:absolute;top:0;bottom:0;left:{x}px;width:{w}px;background:{color};"),
+        );
+        let _ = container.append_child(&el);
+    }
+
+    // Sleep bands: a thin strip at the bottom, one per day. Sleep is a daily
+    // sum on the watch, so the band is anchored at an assumed 07:00 wake and
+    // spans the reported sleep duration backwards (approximate).
+    const WAKE_HOUR_MS: f64 = 7.0 * 3_600_000.0;
+    for s in sleep {
+        if s.sleep_seconds <= 0.0 {
+            continue;
+        }
+        let wake = s.ts + WAKE_HOUR_MS;
+        let from = wake - s.sleep_seconds * 1000.0;
+        let x = ephorix_val_to_pos(chart_id, from);
+        let w = (ephorix_val_to_pos(chart_id, wake) - x).abs().max(2.0);
+        let el = doc.create_element("div").unwrap().dyn_into::<web_sys::HtmlDivElement>().unwrap();
+        el.set_class_name("sleep-band");
+        let hrs = s.sleep_seconds / 3600.0;
+        let _ = el.set_attribute("title", &format!("sleep {:.1}h (restful {:.1}h)", hrs, s.restful_seconds / 3600.0));
+        let _ = el.set_attribute(
+            "style",
+            &format!("position:absolute;left:{x}px;width:{w}px;bottom:0;height:14px;"),
+        );
+        let _ = container.append_child(&el);
+    }
+
+    // Nutrition markers: small dots at the top edge (red = food, gray = water).
+    for n in nutrition {
+        let x = ephorix_val_to_pos(chart_id, n.ts);
+        let color = if n.kind == "water" { "#8f8f8f" } else { "#ff5252" };
+        let label = if n.kind == "water" {
+            format!("water {:.0} ml", n.amount)
+        } else {
+            format!("food {:.0} kcal", n.amount)
+        };
+        let title = match &n.note {
+            Some(note) if !note.is_empty() => format!("{label} · {note}"),
+            _ => label,
+        };
+        let el = doc.create_element("div").unwrap().dyn_into::<web_sys::HtmlDivElement>().unwrap();
+        el.set_class_name("nutrition-dot");
+        let _ = el.set_attribute("title", &title);
+        let _ = el.set_attribute(
+            "style",
+            &format!("position:absolute;left:{x}px;top:0;width:7px;height:7px;background:{color};"),
         );
         let _ = container.append_child(&el);
     }

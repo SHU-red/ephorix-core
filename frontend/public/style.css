@@ -128,6 +128,11 @@ select { min-width: 120px; }
 .session-bar { position: absolute; top: 0; bottom: 0; opacity: 0.5; border: 1px solid #000; }
 .session-bar.open { opacity: 0.75; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35); }
 
+.sleep-band { background: rgba(143, 143, 143, 0.16); border-top: 1px solid #4a4a4a; }
+.nutrition-dot { border: 1px solid #000; transform: translateX(-50%); }
+.detection-row { align-items: center; gap: 10px; }
+.detection-row .row-name { flex: 1; }
+
 /* uPlot legend — dark, Spartan */
 .u-legend {
   background: #101010 !important;

@@ -86,19 +86,47 @@
     }
   }
 
-  function onSelect(id, cb) {
+  /* Direction-aware drag: reports the rectangle in data coords plus a
+     direction hint. Wider-than-tall => "x", taller-than-wide => "y",
+     roughly square => "both". The Rust side decides zoom vs select. */
+  function onDrag(id, cb) {
     var c = charts.get(id);
     if (!c) return;
     c.hooks.setSelect = [function (u) {
       var sel = u.select;
-      if (sel && sel.width > 0) {
-        var from = u.posToVal(sel.left, "x");
-        var to = u.posToVal(sel.left + sel.width, "x");
-        cb(from, to);
-      }
+      if (!sel || sel.width <= 0 || sel.height <= 0) return;
+      var ratio = sel.width / Math.max(1, sel.height);
+      var dir = ratio > 2 ? "x" : (ratio < 0.5 ? "y" : "both");
+      cb(JSON.stringify({
+        x0: u.posToVal(sel.left, "x"),
+        x1: u.posToVal(sel.left + sel.width, "x"),
+        y0: u.posToVal(sel.top, "y"),
+        y1: u.posToVal(sel.top + sel.height, "y"),
+        dir: dir
+      }));
     }];
   }
 
+  function zoomTo(id, x0, x1, y0, y1, dir) {
+    var c = charts.get(id);
+    if (!c) return;
+    if (dir !== "y") {
+      c.setScale("x", { min: Math.min(x0, x1), max: Math.max(x0, x1) });
+    }
+    if (dir !== "x") {
+      c.setScale("y", { min: Math.min(y0, y1), max: Math.max(y0, y1) });
+    }
+    c.setSelect({ left: 0, top: 0, width: 0, height: 0 }, true);
+  }
+
+  function resetZoom(id) {
+    var c = charts.get(id);
+    if (!c) return;
+    c.setScale("x", { min: null, max: null });
+    c.setScale("y", { min: null, max: null });
+    c.setScale("y2", { min: null, max: null });
+    c.setScale("y3", { min: null, max: null });
+  }
   function onCursor(id, cb) {
     var c = charts.get(id);
     if (!c) return;
@@ -152,7 +180,9 @@
     setData: setData,
     setSeriesShow: setSeriesShow,
     destroy: destroy,
-    onSelect: onSelect,
+    onDrag: onDrag,
+    zoomTo: zoomTo,
+    resetZoom: resetZoom,
     onCursor: onCursor,
     getSelection: getSelection,
     clearSelection: clearSelection,
