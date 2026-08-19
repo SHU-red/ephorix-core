@@ -41,9 +41,11 @@ pub struct HealthSample {
     #[serde(default)]
     pub restful_sleep_seconds: Option<i32>,
     #[serde(default)]
-    pub resting_heart_rate: Option<i16>,
-    #[serde(default)]
     pub distance_m: Option<f32>,
+    #[serde(default)]
+    pub active_seconds: Option<i32>,
+    #[serde(default)]
+    pub resting_kcal: Option<f32>,
     #[serde(default)]
     pub movement_intensity: Option<f32>,
     #[serde(default)]
@@ -111,8 +113,9 @@ pub async fn ingest_batch(
                 s.active_calories,
                 s.sleep_seconds,
                 s.restful_sleep_seconds,
-                s.resting_heart_rate,
                 s.distance_m,
+                s.active_seconds,
+                s.resting_kcal,
                 s.movement_intensity,
                 s.reps,
             )

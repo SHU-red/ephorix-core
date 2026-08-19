@@ -17,6 +17,8 @@ pub const METRIC_SLEEP_SECONDS: &str = "sleep_seconds";
 pub const METRIC_RESTFUL_SLEEP_SECONDS: &str = "restful_sleep_seconds";
 pub const METRIC_RESTING_HEART_RATE: &str = "resting_heart_rate";
 pub const METRIC_DISTANCE_M: &str = "distance_m";
+pub const METRIC_ACTIVE_SECONDS: &str = "active_seconds";
+pub const METRIC_RESTING_KCAL: &str = "resting_kcal";
 pub const METRIC_MOVEMENT_INTENSITY: &str = "movement_intensity";
 pub const METRIC_REPS: &str = "reps";
 pub const METRIC_WATER_ML: &str = "water_ml";
@@ -83,12 +85,13 @@ pub fn normalize_pebble(
     active_calories: Option<f32>,
     sleep_seconds: Option<i32>,
     restful_sleep_seconds: Option<i32>,
-    resting_heart_rate: Option<i16>,
     distance_m: Option<f32>,
+    active_seconds: Option<i32>,
+    resting_kcal: Option<f32>,
     movement_intensity: Option<f32>,
     reps: Option<i32>,
 ) -> Vec<Measurement> {
-    let mut out = Vec::with_capacity(9);
+    let mut out = Vec::with_capacity(10);
     if let Some(v) = heart_rate.filter(|v| *v > 0) {
         out.push(Measurement::new(ts, METRIC_HEART_RATE, v as f64, "bpm"));
     }
@@ -104,8 +107,11 @@ pub fn normalize_pebble(
     if let Some(v) = restful_sleep_seconds.filter(|v| *v >= 0) {
         out.push(Measurement::new(ts, METRIC_RESTFUL_SLEEP_SECONDS, v as f64, "s"));
     }
-    if let Some(v) = resting_heart_rate.filter(|v| *v > 0) {
-        out.push(Measurement::new(ts, METRIC_RESTING_HEART_RATE, v as f64, "bpm"));
+    if let Some(v) = active_seconds.filter(|v| *v >= 0) {
+        out.push(Measurement::new(ts, METRIC_ACTIVE_SECONDS, v as f64, "s"));
+    }
+    if let Some(v) = resting_kcal.filter(|v| *v >= 0.0) {
+        out.push(Measurement::new(ts, METRIC_RESTING_KCAL, v as f64, "kcal"));
     }
     if let Some(v) = distance_m.filter(|v| *v > 0.0) {
         out.push(Measurement::new(ts, METRIC_DISTANCE_M, v as f64, "m"));
