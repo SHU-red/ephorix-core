@@ -3,6 +3,15 @@
 Backend + web UI for the EphoriX health/fitness ecosystem. Strictly black and
 red; raw sensor metrics and discrete Agoge events are kept separate.
 
+## The three names
+
+- **EphoriX** — the *ephors*, the Spartan overseers surveilling your hard
+  agoge workout. Every rep, every beat, every step is watched and logged.
+- **Agoge** — the Spartan training regimen itself; a workout. Start one on
+  the watch, train, close it — the raw stream is kept for retro-analysis.
+- **Leonidas** — the standard. Set your goals and train toward reaching
+  Leonidas: the ceiling of the Spartan body.
+
 ```
 ephorix-core/
 ├── docker-compose.yml          # one port (web :9000), one volume (db), api internal
@@ -20,7 +29,7 @@ ephorix-core/
 
 ## Architecture
 
-- **Stateless & event-driven.** `Raw_Health_Data` is a TimescaleDB hypertable
+- **Stateless & event-driven.** `raw_health_data` is a TimescaleDB hypertable
   (`timestamp`, `user_id`, `heart_rate`, `steps`, `active_calories`). Agoge
   sessions are derived from Start/Stop marker events (`agoge_markers`) but
   remain manually editable. `pause`/`resume` markers record rest periods
@@ -38,6 +47,13 @@ ephorix-core/
 - **One volume, everything in the DB.** All state — raw metrics, sessions,
   markers, Agoge types, and per-user UI settings (`user_settings` JSONB) —
   lives in the database volume. No second persistent mount.
+- **Multi-source, normalized.** Every source (Pebble, Fitbit, Garmin, Apple
+  Health, manual) converges on the `measurements` hypertable via
+  `POST /api/v1/ingest`; the Pebble health batch is one such adapter. Derived
+  metrics — body battery (`/api/v1/metrics/body-battery`), automated workout
+  detection (`/api/v1/metrics/workouts`), and food/water intake
+  (`/api/v1/nutrition`) — read that one normalized store, so they work for
+  any source.
 
 ## Run
 
@@ -89,18 +105,20 @@ API access without a proxy).
 
 ## Web UI
 
-- **Timeline**: heart rate, steps and active-kcal series with a legend;
-  every series can be toggled on/off. Downsampled server-side
-  (`time_bucket`), so long ranges stay fluid.
+- **Timeline**: heart rate, steps and active-kcal series with a live legend;
+  each metric toggles from a compact pill strip. Time range is a button row —
+  **1D / 1W / 1M / 1Y** — downsampled server-side (`time_bucket`), so even a
+  year stays fluid.
 - **Region selection**: drag on the plot → the range is shown, then
   "CREATE SESSION FROM SELECTION" (with a chosen Agoge type) or
   "CLEAR SELECTION". "CLOSE OPEN AT CURSOR" closes the open session at the
   hovered time.
 - **Agoge sessions**: list with type/status/times, delete.
-- **Agoge types**: create and edit — name, color picker, emoji icon set.
-  Renames/deletes never break sessions (referenced by id; missing types
+- **Agoge types**: create and edit — name, color picker, monochrome SVG glyph
+  set. Renames/deletes never break sessions (referenced by id; missing types
   render as *Undefined*).
-- **Settings live in the DB**: series visibility and the timeline range are
+- **Settings**: a collapsible panel holds the API base URL and token
+  (`X-EphoriX-Token`). Series visibility and the timeline range are also
   stored per user (`/api/v1/settings`, `user_settings` table) — the web app
   needs no volume of its own.
 
