@@ -1,4 +1,6 @@
 services:
+  # --- Database: internal only. No host port — reachable exclusively from
+  # the compose network (api connects via `db:5432`).
   db:
     image: timescale/timescaledb:${EPHORIX_TIMESCALE_TAG:-latest-pg16}
     container_name: ephorix-db
@@ -7,17 +9,10 @@ services:
       POSTGRES_USER: ${EPHORIX_DB_USER:-ephorix}
       POSTGRES_PASSWORD: ${EPHORIX_DB_PASSWORD:-ephorix}
       POSTGRES_DB: ${EPHORIX_DB_NAME:-ephorix}
-    ports:
-      # Host port only; the container port stays 5432 (DATABASE_URL uses the
-      # internal network, so this mapping is optional — omit it to keep the
-      # database unreachable from outside the stack).
-      - "${EPHORIX_DB_PORT:-5432}:5432"
     volumes:
-      # Named volume by default; set EPHORIX_PG_VOLUME to an absolute host
-      # path (e.g. /var/lib/ephorix/pgdata) for a bind mount.
-      # On RHEL/Fedora with SELinux enabled, bind mounts need a relabel
-      # mode: set EPHORIX_VOLUME_MODE=z (shared) or =Z (private). Named
-      # volumes are pre-labeled by Docker and need no mode.
+      # The one and only volume. Named by default; set EPHORIX_PG_VOLUME to
+      # an absolute host path for a bind mount. On RHEL/Fedora SELinux set
+      # EPHORIX_VOLUME_MODE=z (shared) or =Z (private) for bind mounts.
       - ${EPHORIX_PG_VOLUME:-ephorix_pgdata}:/var/lib/postgresql/data${EPHORIX_VOLUME_MODE:+:${EPHORIX_VOLUME_MODE}}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
@@ -25,20 +20,17 @@ services:
       timeout: 5s
       retries: 12
 
+  # --- API: internal only. No host port — reachable exclusively through the
+  # web service's /api proxy.
   api:
     build:
       context: ./backend
     container_name: ephorix-api
     restart: unless-stopped
     environment:
-      # Override wholesale if the password contains URL-reserved characters
-      # or the db service name/port ever changes.
       DATABASE_URL: ${EPHORIX_DATABASE_URL:-postgres://${EPHORIX_DB_USER:-ephorix}:${EPHORIX_DB_PASSWORD:-ephorix}@db:5432/${EPHORIX_DB_NAME:-ephorix}}
       EPHORIX_BIND: 0.0.0.0:3000
-      EPHORIX_CORS_ORIGINS: ${EPHORIX_CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
       RUST_LOG: ${EPHORIX_LOG_LEVEL:-info,ephorix_api=debug}
-    ports:
-      - "${EPHORIX_API_PORT:-3000}:3000"
     depends_on:
       db:
         condition: service_healthy
@@ -48,6 +40,27 @@ services:
       timeout: 5s
       retries: 5
       start_period: 5s
+
+  # --- Web: the ONLY exposed port. Serves the UI at / and proxies /api +
+  # /healthz to the API (same-origin, no CORS). The watch uses this port as
+  # its base URL too (POST /api/v1/health/batch, /api/v1/events/marker, ...).
+  web:
+    build:
+      context: ./frontend
+    container_name: ephorix-web
+    restart: unless-stopped
+    ports:
+      - "${EPHORIX_WEB_PORT:-9000}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # Through nginx -> api -> db: proves the whole chain on the one port.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   ephorix_pgdata:

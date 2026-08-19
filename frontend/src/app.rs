@@ -9,7 +9,10 @@ use crate::timeline::TimelineChart;
 #[component]
 pub fn App() -> impl IntoView {
     let (token, set_token) = create_signal("ephorix-dev-1".to_string());
-    let (base, set_base) = create_signal("http://localhost:3000".to_string());
+    // Empty = same origin (served behind the web service, /api proxied to
+    // the backend). Dev: run `trunk serve --proxy-backend http://localhost:3000`
+    // or type the API URL here.
+    let (base, set_base) = create_signal(String::new());
     let (days, set_days) = create_signal(7i64);
     let (types, set_types) = create_signal(Vec::<AgogeType>::new());
     let (sessions, set_sessions) = create_signal(Vec::<AgogeSession>::new());
@@ -175,6 +178,7 @@ pub fn App() -> impl IntoView {
                             prop:value=base
                             on:input=move |ev| set_base.set(event_target_value(&ev))
                             spellcheck="false"
+                            placeholder="SAME-ORIGIN"
                         />
                     </label>
                     <label class="ctl">

@@ -33,28 +33,35 @@ ephorix-core/
 ## Run
 
 ```bash
-docker compose up --build -d          # db + api on :5432 / :3000
-curl localhost:3000/healthz           # → ok
-curl -H "X-EphoriX-Token: ephorix-dev-1" localhost:3000/api/v1/agoge-types
+docker compose up --build -d          # one exposed port: 9000
+curl localhost:9000/healthz           # → ok (through nginx → api → db)
+curl -H "X-EphoriX-Token: ephorix-dev-1" localhost:9000/api/v1/agoge-types
 ```
 
 Migrations run automatically on boot (`sqlx::migrate!`).
 
-Everything in `docker-compose.yml` is env-driven; copy `.env.example` to `.env`
-and adjust (ports, credentials, volume, image tag, CORS origins). The API
-healthcheck keeps `depends_on: service_healthy` honest — the api container
-only becomes "healthy" when `/healthz` answers.
+**Topology: one port, one volume.** The database and API have **no host
+ports** — they are internal to the compose network. The web service is the
+only entry point:
+
+| Port | What lives there |
+|---|---|
+| `9000` (`EPHORIX_WEB_PORT`) | web UI at `/`, API at `/api/*` (same-origin, no CORS) — the watch uses this same port as its base URL (`POST /api/v1/health/batch`, `POST /api/v1/events/marker`, …) |
+
+The one volume is the database data dir (`EPHORIX_PG_VOLUME`).
+
+Copy `.env.example` to `.env` and adjust. Healthchecks gate startup:
+api becomes healthy only when `/healthz` answers, and the web container's
+healthcheck runs through nginx → api → db, proving the whole chain.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `EPHORIX_DB_USER` / `EPHORIX_DB_PASSWORD` / `EPHORIX_DB_NAME` | `ephorix` | database credentials |
-| `EPHORIX_DB_PORT` | `5432` | host port for the database (omit to keep DB stack-internal) |
-| `EPHORIX_PG_VOLUME` | `ephorix_pgdata` | named volume, or an absolute host path for a bind mount |
-| `EPHORIX_VOLUME_MODE` | *(empty)* | SELinux relabel mode `z`/`Z` for bind mounts (RHEL/Fedora); ignored for named volumes |
+| `EPHORIX_DB_USER` / `EPHORIX_DB_PASSWORD` / `EPHORIX_DB_NAME` | `ephorix` | database credentials (internal only) |
+| `EPHORIX_PG_VOLUME` | `ephorix_pgdata` | the one volume: named volume, or an absolute host path for a bind mount |
+| `EPHORIX_VOLUME_MODE` | *(empty)* | SELinux relabel mode `z`/`Z` for bind mounts (RHEL/Fedora) |
 | `EPHORIX_TIMESCALE_TAG` | `latest-pg16` | TimescaleDB image tag |
 | `EPHORIX_DATABASE_URL` | built from the above | full override (needed if the password contains URL-reserved chars) |
-| `EPHORIX_API_PORT` | `3000` | host port for the API |
-| `EPHORIX_CORS_ORIGINS` | localhost:8080 | comma-separated browser origins allowed to call the API |
+| `EPHORIX_WEB_PORT` | `9000` | the single exposed port (UI + `/api`) |
 | `EPHORIX_LOG_LEVEL` | `info,ephorix_api=debug` | `RUST_LOG` filter |
 
 Frontend (dev, port 8080):
@@ -63,17 +70,19 @@ Frontend (dev, port 8080):
 cd frontend
 cargo install trunk wasm-bindgen-cli   # once
 rustup target add wasm32-unknown-unknown
-trunk serve --open
+trunk serve --proxy-backend http://localhost:3000
 ```
 
-Set BASE / TOKEN in the header and hit SYNC. Drag on the timeline to select a
-range → "CREATE SESSION FROM SELECTION"; hover to a time → "CLOSE OPEN AT
-CURSOR".
+The UI defaults to same-origin API calls (BASE field empty): in dev, trunk
+forwards `/api/*` to the backend via `--proxy-backend`; in production, nginx
+does the same. Type a full URL in the BASE field to override (e.g. direct
+API access without a proxy). Drag on the timeline to select a range →
+"CREATE SESSION FROM SELECTION"; hover to a time → "CLOSE OPEN AT CURSOR".
 
 ## Deploying to a server
 
-The watch does **not** need the frontend — it talks to the API directly.
-Minimal production stack: `docker compose up --build -d` behind TLS.
+The watch does **not** need the frontend — it talks to the API on the same
+port. Production stack: `docker compose up --build -d` behind TLS.
 
 1. **Rotate the seeded tokens.** `0002_seed.sql` ships dev tokens
    (`ephorix-dev-1`, `ephorix-dev-2`). Add real users on the box:
@@ -83,15 +92,14 @@ Minimal production stack: `docker compose up --build -d` behind TLS.
    (or `UPDATE users SET token = ... WHERE id = ...`). Put the token into the
    watch's config page (long-press the app in the Pebble phone app →
    Settings → BACKEND BASE URL + TOKEN).
-2. **TLS in front.** The API is plain HTTP; put Caddy/nginx in front
-   (Caddy: `reverse_proxy 127.0.0.1:3000` + your domain). Set
-   `EPHORIX_CORS_ORIGINS` to the served frontend origin if you host the UI
-   on a domain.
-3. **Backup** `EPHORIX_PG_VOLUME` (or the bind-mount path). The hypertable
-   and all data live there.
-4. **Watch defaults.** `src/js/pebble-js-app.js` defaults to
-   `http://192.168.1.10:3000` — the config page overrides it; nothing to
-   recompile.
+2. **One port.** Expose only `9000` — the web service serves the UI and
+   proxies `/api` to the backend, so the watch's base URL is simply
+   `http://your-host:9000` and the browser needs no CORS. Nothing else is
+   reachable from outside the stack (db and api have no host ports).
+3. **TLS in front.** The web service is plain HTTP; put Caddy/nginx in front
+   (Caddy: `reverse_proxy 127.0.0.1:9000` + your domain).
+4. **Backup** `EPHORIX_PG_VOLUME` (or the bind-mount path). The hypertable
+   and all data live there — it is the only state in the stack.
 
 ## Verify
 
