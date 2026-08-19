@@ -15,7 +15,10 @@ services:
     volumes:
       # Named volume by default; set EPHORIX_PG_VOLUME to an absolute host
       # path (e.g. /var/lib/ephorix/pgdata) for a bind mount.
-      - ${EPHORIX_PG_VOLUME:-ephorix_pgdata}:/var/lib/postgresql/data
+      # On RHEL/Fedora with SELinux enabled, bind mounts need a relabel
+      # mode: set EPHORIX_VOLUME_MODE=z (shared) or =Z (private). Named
+      # volumes are pre-labeled by Docker and need no mode.
+      - ${EPHORIX_PG_VOLUME:-ephorix_pgdata}:/var/lib/postgresql/data${EPHORIX_VOLUME_MODE:+:${EPHORIX_VOLUME_MODE}}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s

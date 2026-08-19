@@ -50,6 +50,7 @@ only becomes "healthy" when `/healthz` answers.
 | `EPHORIX_DB_USER` / `EPHORIX_DB_PASSWORD` / `EPHORIX_DB_NAME` | `ephorix` | database credentials |
 | `EPHORIX_DB_PORT` | `5432` | host port for the database (omit to keep DB stack-internal) |
 | `EPHORIX_PG_VOLUME` | `ephorix_pgdata` | named volume, or an absolute host path for a bind mount |
+| `EPHORIX_VOLUME_MODE` | *(empty)* | SELinux relabel mode `z`/`Z` for bind mounts (RHEL/Fedora); ignored for named volumes |
 | `EPHORIX_TIMESCALE_TAG` | `latest-pg16` | TimescaleDB image tag |
 | `EPHORIX_DATABASE_URL` | built from the above | full override (needed if the password contains URL-reserved chars) |
 | `EPHORIX_API_PORT` | `3000` | host port for the API |
