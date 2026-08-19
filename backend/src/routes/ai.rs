@@ -14,7 +14,7 @@ use axum::{
     extract::{Extension, State},
     Json,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
@@ -29,14 +29,6 @@ pub struct ParseRequest {
     pub text: String,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ParseResult {
-    pub kind: String, // "food" | "water"
-    pub amount: f64,  // kcal for food, ml for water
-    pub note: String,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AiProvider {
@@ -45,6 +37,7 @@ struct AiProvider {
     #[serde(default)]
     api_key: String,
 }
+
 
 pub async fn parse(
     State(pool): State<PgPool>,

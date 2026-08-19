@@ -15,7 +15,6 @@ pub const METRIC_STEPS: &str = "steps";
 pub const METRIC_ACTIVE_CALORIES: &str = "active_calories";
 pub const METRIC_SLEEP_SECONDS: &str = "sleep_seconds";
 pub const METRIC_RESTFUL_SLEEP_SECONDS: &str = "restful_sleep_seconds";
-pub const METRIC_RESTING_HEART_RATE: &str = "resting_heart_rate";
 pub const METRIC_DISTANCE_M: &str = "distance_m";
 pub const METRIC_ACTIVE_SECONDS: &str = "active_seconds";
 pub const METRIC_RESTING_KCAL: &str = "resting_kcal";

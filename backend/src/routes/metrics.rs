@@ -153,7 +153,7 @@ pub async fn workouts(
     Extension(user): Extension<AuthUser>,
     Query(q): Query<RangeQuery>,
 ) -> ApiResult<Json<Value>> {
-    let range = validate_range(&q)?;
+    validate_range(&q)?;
 
     let buckets: Vec<HrBucket> = sqlx::query_as(
         "SELECT
