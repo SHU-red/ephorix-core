@@ -401,9 +401,9 @@ select { min-width: 120px; }
   text-align: center;
   white-space: nowrap;
 }
-.tab .en { display: none; }
-.tab:hover .gr { display: none; }
-.tab:hover .en { display: inline; }
+.tab .gr { display: none; }
+.tab:hover .en { display: none; }
+.tab:hover .gr { display: inline; }
 .tab:hover { border-color: var(--red); color: var(--red); }
 .tab.on { background: var(--red); color: #000; border-color: var(--red); }
 
