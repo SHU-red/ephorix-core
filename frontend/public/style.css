@@ -383,6 +383,10 @@ select { min-width: 120px; }
   position: absolute; left: 0; top: 0; bottom: 0;
   width: 3px; background: var(--red);
 }
+.th-body { display: flex; align-items: center; gap: 20px; }
+.th-content { flex: 1; min-width: 0; }
+.th-hero-img { height: 110px; width: auto; flex: 0 0 auto; filter: drop-shadow(0 0 14px rgba(229, 57, 53, 0.3)); }
+@media (max-width: 640px) { .th-hero-img { height: 72px; } }
 .th-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
 .th-title { font-family: "Anton", "Arial Narrow", sans-serif; font-size: 34px; color: var(--red); letter-spacing: 0.08em; text-transform: uppercase; line-height: 1; }
 .th-title .en { display: none; }

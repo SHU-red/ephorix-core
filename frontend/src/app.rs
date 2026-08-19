@@ -151,21 +151,29 @@ impl Tab {
 /// Dictionary-style hero box: the tab title explained like a lexicon entry.
 #[component]
 fn TabHero(tab: Tab) -> impl IntoView {
+    let helmet = (tab == Tab::Leonidas).then_some("/assets/helmet_transparent.png");
     view! {
         <div class="tab-hero">
-            <div class="th-head">
-                <span class="th-title">
-                    <span class="gr">{tab.label()}</span>
-                    <span class="en">{tab.english()}</span>
-                </span>
-                <span class="th-greek">{tab.greek()}</span>
+            <div class="th-body">
+                <div class="th-content">
+                    <div class="th-head">
+                        <span class="th-title">
+                            <span class="gr">{tab.label()}</span>
+                            <span class="en">{tab.english()}</span>
+                        </span>
+                        <span class="th-greek">{tab.greek()}</span>
+                    </div>
+                    <div class="th-meta">
+                        <span class="th-pos">{tab.pos()}</span>
+                        <span class="th-ipa">{tab.ipa()}</span>
+                    </div>
+                    <p class="th-def">{tab.definition()}</p>
+                    <p class="th-etym">{tab.etymology()}</p>
+                </div>
+                {helmet.map(|src| view! {
+                    <img class="th-hero-img" src=src alt="Spartan helmet" />
+                })}
             </div>
-            <div class="th-meta">
-                <span class="th-pos">{tab.pos()}</span>
-                <span class="th-ipa">{tab.ipa()}</span>
-            </div>
-            <p class="th-def">{tab.definition()}</p>
-            <p class="th-etym">{tab.etymology()}</p>
         </div>
     }
 }
