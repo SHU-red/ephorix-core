@@ -70,6 +70,14 @@ pub const SHIELD: &str = concat!(
     r##"</svg>"##,
 );
 
+/// Brand mark: a filled aspis (round shield) split by an upward lambda whose
+/// apex and feet exceed the circle, breaking the ring into 3 arcs.
+pub const MARK: &str = concat!(
+    r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">"##,
+    r##"<defs><mask id="ephorix-lam"><rect width="100" height="100" fill="white"/><path d="M50 0 L22 100 M50 0 L78 100" stroke="black" stroke-width="16"/></mask></defs>"##,
+    r##"<g mask="url(#ephorix-lam)"><circle cx="50" cy="53" r="39" fill="#E53935"/><circle cx="50" cy="53" r="39" fill="none" stroke="#E53935" stroke-width="5"/></g>"##,
+    r##"</svg>"##,
+);
 /// Six-spoke Spartan wheel.
 pub const WHEEL: &str = concat!(
     r##"<svg viewBox="0 0 24 24" fill="none" stroke="#E53935" stroke-width="1.8" stroke-linecap="square">"##,

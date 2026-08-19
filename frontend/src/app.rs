@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::api::*;
-use crate::icons::{glyph_key, glyph_svg, GLYPH_KEYS, LAMBDA};
+use crate::icons::{glyph_key, glyph_svg, GLYPH_KEYS, LAMBDA, MARK};
 use crate::timeline::{SeriesConfig, TimelineChart};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +131,21 @@ impl Tab {
             Tab::Nomoi => "From Greek nomos, \"law, custom\".",
         }
     }
+
+    fn english(self) -> &'static str {
+        match self {
+            Tab::Gymnasia => "Dashboard",
+            Tab::Agoges => "Types",
+            Tab::Askesis => "Metrics",
+            Tab::Syntaxis => "Workouts",
+            Tab::Leonidas => "Targets",
+            Tab::Enomotia => "Friends",
+            Tab::Syssitia => "Nutrition",
+            Tab::Rank => "Ranks",
+            Tab::Anapavsis => "Recovery",
+            Tab::Nomoi => "Settings",
+        }
+    }
 }
 
 /// Dictionary-style hero box: the tab title explained like a lexicon entry.
@@ -139,7 +154,10 @@ fn TabHero(tab: Tab) -> impl IntoView {
     view! {
         <div class="tab-hero">
             <div class="th-head">
-                <span class="th-title">{tab.label()}</span>
+                <span class="th-title">
+                    <span class="gr">{tab.label()}</span>
+                    <span class="en">{tab.english()}</span>
+                </span>
                 <span class="th-greek">{tab.greek()}</span>
             </div>
             <div class="th-meta">
@@ -189,7 +207,7 @@ pub fn App() -> impl IntoView {
     let (ai_base, set_ai_base) = create_signal(String::new());
     let (ai_model, set_ai_model) = create_signal(String::new());
     let (ai_key, set_ai_key) = create_signal(String::new());
-    let (body_score, set_body_score) = create_signal(None::<f64>);
+    let (body_energy, set_body_energy) = create_signal(None::<BodyEnergyDay>);
     let (current_tab, set_current_tab) = create_signal(Tab::Gymnasia);
     // Leonidas targets (persisted in settings).
     let (target_steps, set_target_steps) = create_signal(10_000i64);
@@ -203,6 +221,7 @@ pub fn App() -> impl IntoView {
     let (new_type_name, set_new_type_name) = create_signal(String::new());
     let (new_type_color, set_new_type_color) = create_signal("#E53935".to_string());
     let (new_type_icon, set_new_type_icon) = create_signal(GLYPH_KEYS[0].to_string());
+    let (new_type_category, set_new_type_category) = create_signal("mixed".to_string());
 
     // Persist series visibility + range to the backend settings.
     let persist_settings = move || {
@@ -252,8 +271,8 @@ pub fn App() -> impl IntoView {
                 Ok(d) => set_detections.set(d),
                 Err(e) => set_error.set(Some(e)),
             }
-            match fetch_body_score(&base, &token, from_ms, to_ms).await {
-                Ok(s) => set_body_score.set(s),
+            match fetch_body_battery(&base, &token, from_ms, to_ms).await {
+                Ok(b) => set_body_energy.set(b),
                 Err(_) => {}
             }
             // Settings load once per session (do not clobber user changes).
@@ -398,8 +417,9 @@ pub fn App() -> impl IntoView {
         let token = token.get();
         let color = new_type_color.get();
         let icon = new_type_icon.get();
+        let category = new_type_category.get();
         spawn_local(async move {
-            let body = json!({ "name": name, "colorCode": color, "icon": icon });
+            let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category });
             match post_json(&base, &token, "/api/v1/agoge-types", &body).await {
                 Ok(_) => {
                     set_new_type_name.set(String::new());
@@ -410,11 +430,11 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    let update_type = move |id: String, name: String, color: String, icon: String| {
+    let update_type = move |id: String, name: String, color: String, icon: String, category: String| {
         let base = base.get();
         let token = token.get();
         spawn_local(async move {
-            let body = json!({ "name": name, "colorCode": color, "icon": icon });
+            let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category });
             match put_json(&base, &token, &format!("/api/v1/agoge-types/{id}"), &body).await {
                 Ok(_) => {
                     set_editing_type.set(None);
@@ -520,7 +540,7 @@ pub fn App() -> impl IntoView {
             <header class="header">
                 <div class="brand">
                     <div class="brand-row">
-                        <h1>"ΕΡΗΟRΙΧ"</h1>
+                        <h1><span>"Σρη"</span><span class="mark-o" inner_html=MARK></span><span>"τιΧ"</span></h1>
                     </div>
                     <span class="sub">"ΑΓΩΓΗ · TRAINING COMMAND"</span>
                 </div>
@@ -532,7 +552,8 @@ pub fn App() -> impl IntoView {
                     let t = *t;
                     view! {
                         <button class="tab" class:on=move || current_tab.get() == t on:click=move |_| set_current_tab.set(t)>
-                            {t.label()}
+                            <span class="gr">{t.label()}</span>
+                            <span class="en">{t.english()}</span>
                         </button>
                     }
                 }).collect_view()}
@@ -587,8 +608,8 @@ pub fn App() -> impl IntoView {
                             <div class="kpi-chip">
                                 <span class="kpi-label">"BODY BATTERY"</span>
                                 <div class="kpi-value">
-                                    {move || body_score.get().map(|s| format!("{s:.0}")).unwrap_or_else(|| "—".to_string())}
-                                    <span class="unit">"/100"</span>
+                                    {move || body_energy.get().map(|b| format!("{:.0}", b.score)).unwrap_or_else(|| "—".to_string())}
+                                    <span class="unit">"/300"</span>
                                 </div>
                             </div>
                         </div>
@@ -675,7 +696,7 @@ pub fn App() -> impl IntoView {
                                             view! {
                                                 <TypeEditRow
                                                     ty=t_edit
-                                                    on_save=Callback::new(move |(n, c, i): (String, String, String)| update_type(t_edit_id.clone(), n, c, i))
+                                                    on_save=Callback::new(move |(n, c, i, cat): (String, String, String, String)| update_type(t_edit_id.clone(), n, c, i, cat))
                                                     on_cancel=Callback::new(move |_| set_editing_type.set(None))
                                                 />
                                             }.into_view()
@@ -695,6 +716,14 @@ pub fn App() -> impl IntoView {
                                 <input prop:value=new_type_name on:input=move |ev| set_new_type_name.set(event_target_value(&ev)) placeholder="NEW TYPE NAME" maxlength="40" />
                                 <input type="color" prop:value=new_type_color on:input=move |ev| set_new_type_color.set(event_target_value(&ev)) />
                                 <GlyphPicker value=new_type_icon set=set_new_type_icon />
+                                <select on:change=move |ev| set_new_type_category.set(event_target_value(&ev))>
+                                    <option value="distance">"DISTANCE"</option>
+                                    <option value="repetitive">"REPETITIVE"</option>
+                                    <option value="dynamic">"DYNAMIC"</option>
+                                    <option value="circuit">"CIRCUIT"</option>
+                                    <option value="recovery">"RECOVERY"</option>
+                                    <option value="mixed" selected>"MIXED"</option>
+                                </select>
                                 <button class="btn" on:click=add_type>"ADD"</button>
                             </div>
                         </section>
@@ -843,22 +872,26 @@ pub fn App() -> impl IntoView {
                     Tab::Anapavsis => view! {
                         <TabHero tab=Tab::Anapavsis />
                         <section class="panel">
-                            <div class="panel-head"><h2>"BODY BATTERY"</h2></div>
+                            <div class="panel-head"><h2>"BODY BATTERY"</h2><span class="muted">"full = 300 · the 300"</span></div>
                             <div class="kpi">
                                 <div class="kpi-chip">
                                     <span class="kpi-label">"BODY BATTERY"</span>
-                                    <div class="kpi-value">{move || body_score.get().map(|s| format!("{s:.0}")).unwrap_or_else(|| "—".to_string())}<span class="unit">"/100"</span></div>
+                                    <div class="kpi-value">{move || body_energy.get().map(|b| format!("{:.0}", b.score)).unwrap_or_else(|| "—".to_string())}<span class="unit">"/300"</span></div>
+                                </div>
+                                <div class="kpi-chip">
+                                    <span class="kpi-label">"STRESS"</span>
+                                    <div class="kpi-value">{move || body_energy.get().map(|b| format!("{:.0}", b.stress)).unwrap_or_else(|| "—".to_string())}<span class="unit">"/100"</span></div>
+                                </div>
+                                <div class="kpi-chip">
+                                    <span class="kpi-label">"DRAIN"</span>
+                                    <div class="kpi-value">{move || body_energy.get().map(|b| format!("{:.0}", b.drain)).unwrap_or_else(|| "—".to_string())}<span class="unit">"PTS"</span></div>
                                 </div>
                                 <div class="kpi-chip">
                                     <span class="kpi-label">"SLEEP (RANGE)"</span>
                                     <div class="kpi-value">{move || format!("{:.1}", sleep.get().iter().map(|s| s.sleep_seconds).sum::<f64>() / 3600.0)}<span class="unit">"H"</span></div>
                                 </div>
-                                <div class="kpi-chip">
-                                    <span class="kpi-label">"WORKOUTS"</span>
-                                    <div class="kpi-value">{move || format!("{}", sessions.get().len())}<span class="unit">""</span></div>
-                                </div>
                             </div>
-                            <p class="muted" style="margin-top:12px">"Anapavsis is computed from sleep (recharge) against activity (drain). Sleep long, train hard, and the battery stays full."</p>
+                            <p class="muted" style="margin-top:12px">"Anapavsis = 300 + sleep recharge − activity drain − stress. Stress is an HR-elevation strain score (no HRV on the watch). Sleep long, train hard, and the battery stays near the 300."</p>
                         </section>
                     }.into_view(),
 
@@ -969,11 +1002,13 @@ fn TypeRow(
     let name = ty.name.clone();
     let glyph = glyph_svg(glyph_key(&ty.icon));
     let color = ty.color_code.clone();
+    let category = ty.category.clone();
     view! {
         <li class="row">
             <span class="dot" style=format!("background:{color}")></span>
             <span class="row-icon" inner_html=glyph></span>
             <span class="row-name">{name}</span>
+            <span class="row-time">{category.to_uppercase()}</span>
             <button class="btn small" on:click=move |_| on_edit.call(id_edit.clone())>
                 "EDIT"
             </button>
@@ -988,12 +1023,13 @@ fn TypeRow(
 #[component]
 fn TypeEditRow(
     ty: AgogeType,
-    on_save: Callback<(String, String, String)>,
+    on_save: Callback<(String, String, String, String)>,
     on_cancel: Callback<()>,
 ) -> impl IntoView {
     let (name, set_name) = create_signal(ty.name.clone());
     let (color, set_color) = create_signal(ty.color_code.clone());
     let (icon, set_icon) = create_signal(ty.icon.clone());
+    let (category, set_category) = create_signal(ty.category.clone());
     view! {
         <li class="row edit">
             <input
@@ -1004,8 +1040,16 @@ fn TypeEditRow(
             <input type="color" prop:value=color
                 on:input=move |ev| set_color.set(event_target_value(&ev)) />
             <GlyphPicker value=icon set=set_icon />
+            <select on:change=move |ev| set_category.set(event_target_value(&ev))>
+                <option value="distance" selected=move || category.get() == "distance">"DISTANCE"</option>
+                <option value="repetitive" selected=move || category.get() == "repetitive">"REPETITIVE"</option>
+                <option value="dynamic" selected=move || category.get() == "dynamic">"DYNAMIC"</option>
+                <option value="circuit" selected=move || category.get() == "circuit">"CIRCUIT"</option>
+                <option value="recovery" selected=move || category.get() == "recovery">"RECOVERY"</option>
+                <option value="mixed" selected=move || category.get() == "mixed">"MIXED"</option>
+            </select>
             <button class="btn small"
-                on:click=move |_| on_save.call((name.get(), color.get(), icon.get()))>
+                on:click=move |_| on_save.call((name.get(), color.get(), icon.get(), category.get()))>
                 "SAVE"
             </button>
             <button class="btn small" on:click=move |_| on_cancel.call(())>

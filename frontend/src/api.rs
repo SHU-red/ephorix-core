@@ -14,6 +14,7 @@ pub struct AgogeType {
     pub name: String,
     pub color_code: String,
     pub icon: String,
+    pub category: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -249,12 +250,21 @@ pub async fn parse_ai(base: &str, token: &str, text: &str) -> Result<Value, Stri
     post_json(base, token, "/api/v1/ai/parse", &json!({ "text": text })).await
 }
 
-pub async fn fetch_body_score(
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BodyEnergyDay {
+    pub score: f64,
+    pub recharge: f64,
+    pub drain: f64,
+    pub stress: f64,
+}
+
+pub async fn fetch_body_battery(
     base: &str,
     token: &str,
     from_ms: f64,
     to_ms: f64,
-) -> Result<Option<f64>, String> {
+) -> Result<Option<BodyEnergyDay>, String> {
     let v = Request::get(&format!("{base}/api/v1/metrics/body-battery"))
         .header("X-EphoriX-Token", token)
         .query([
@@ -267,9 +277,6 @@ pub async fn fetch_body_score(
         .json::<Value>()
         .await
         .map_err(|e| format!("invalid json: {e}"))?;
-    Ok(v.get("days")
-        .and_then(|d| d.as_array())
-        .and_then(|d| d.last())
-        .and_then(|d| d.get("score"))
-        .and_then(|s| s.as_f64()))
+    let day = v.get("days").and_then(|d| d.as_array()).and_then(|d| d.last()).cloned();
+    Ok(day.and_then(|d| serde_json::from_value(d).ok()))
 }

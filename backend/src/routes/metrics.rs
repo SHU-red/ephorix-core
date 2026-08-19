@@ -18,11 +18,16 @@ use uuid::Uuid;
 use crate::{auth::AuthUser, error::{ApiError, ApiResult}, models::AgogeSession};
 
 // --- body battery -----------------------------------------------------------
+// Full = 300 (the 300 Spartans). Recharge from sleep, discharge from activity
+// and stress (an HR-elevation strain score — no HRV on the watch).
 
-const RECHARGE_PER_HOUR: f64 = 20.0;
-const MAX_RECHARGE: f64 = 80.0;
-const DRAIN_PER_KCAL: f64 = 0.06;
-const DRAIN_PER_10K_STEPS: f64 = 25.0;
+const RECHARGE_PER_HOUR: f64 = 60.0;
+const MAX_RECHARGE: f64 = 300.0;
+const DRAIN_PER_KCAL: f64 = 0.12;
+const DRAIN_PER_10K_STEPS: f64 = 50.0;
+const DRAIN_PER_STRESS: f64 = 1.5;
+const STRESS_RESTING_HR: f64 = 55.0; // bpm below which stress is 0
+const STRESS_FULL_HR: f64 = 120.0;   // bpm above which stress is 100
 
 #[derive(Debug, sqlx::FromRow)]
 struct DayAggregate {
@@ -30,6 +35,7 @@ struct DayAggregate {
     sleep_s: f64,
     kcal: f64,
     steps: f64,
+    avg_hr: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,6 +45,7 @@ struct BodyEnergyPoint {
     score: f64,
     recharge: f64,
     drain: f64,
+    stress: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,10 +71,11 @@ pub async fn body_battery(
             date_trunc('day', ts)::date AS day,
             COALESCE(SUM(value) FILTER (WHERE metric = 'sleep_seconds'), 0)::float8 AS sleep_s,
             COALESCE(SUM(value) FILTER (WHERE metric = 'active_calories'), 0)::float8 AS kcal,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'steps'), 0)::float8 AS steps
+            COALESCE(SUM(value) FILTER (WHERE metric = 'steps'), 0)::float8 AS steps,
+            COALESCE(AVG(value) FILTER (WHERE metric = 'heart_rate'), 0)::float8 AS avg_hr
          FROM measurements
          WHERE user_id = $1 AND ts >= $2 AND ts < $3
-           AND metric IN ('sleep_seconds', 'active_calories', 'steps')
+           AND metric IN ('sleep_seconds', 'active_calories', 'steps', 'heart_rate')
          GROUP BY 1
          ORDER BY 1",
     )
@@ -81,20 +89,28 @@ pub async fn body_battery(
     for d in &days {
         let recharge = (d.sleep_s / 3600.0 * RECHARGE_PER_HOUR).min(MAX_RECHARGE);
         let drain = (d.kcal * DRAIN_PER_KCAL) + (d.steps / 10_000.0 * DRAIN_PER_10K_STEPS);
-        let score = (100.0 + recharge - drain).clamp(0.0, 100.0);
-        points.push(BodyEnergyPoint { day: d.day, score, recharge, drain });
+        let stress = if d.avg_hr > STRESS_RESTING_HR {
+            ((d.avg_hr - STRESS_RESTING_HR) / (STRESS_FULL_HR - STRESS_RESTING_HR) * 100.0)
+                .clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+        let stress_drain = stress * DRAIN_PER_STRESS;
+        let score = (300.0 + recharge - drain - stress_drain).clamp(0.0, 300.0);
+        points.push(BodyEnergyPoint { day: d.day, score, recharge, drain, stress });
         sqlx::query(
-            "INSERT INTO body_energy (user_id, day, score, recharge, drain, updated_at)
-             VALUES ($1, $2, $3, $4, $5, now())
+            "INSERT INTO body_energy (user_id, day, score, recharge, drain, stress, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, now())
              ON CONFLICT (user_id, day)
              DO UPDATE SET score = EXCLUDED.score, recharge = EXCLUDED.recharge,
-                           drain = EXCLUDED.drain, updated_at = now()",
+                           drain = EXCLUDED.drain, stress = EXCLUDED.stress, updated_at = now()",
         )
         .bind(user.0)
         .bind(d.day)
         .bind(score)
         .bind(recharge)
         .bind(drain)
+        .bind(stress)
         .execute(&pool)
         .await?;
     }

@@ -28,6 +28,21 @@ pub struct UpsertType {
     pub color_code: Option<String>,
     #[serde(default)]
     pub icon: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+const CATEGORIES: [&str; 6] = [
+    "distance", "repetitive", "dynamic", "circuit", "recovery", "mixed",
+];
+
+fn normalize_category(c: Option<String>) -> String {
+    let c = c.unwrap_or_else(|| "mixed".to_string());
+    if CATEGORIES.contains(&c.as_str()) {
+        c
+    } else {
+        "mixed".to_string()
+    }
 }
 
 pub async fn create(
@@ -38,14 +53,16 @@ pub async fn create(
     if name.is_empty() {
         return Err(ApiError::BadRequest("name must not be empty".to_string()));
     }
+    let category = normalize_category(body.category);
     let ty = sqlx::query_as::<_, AgogeType>(
-        "INSERT INTO agoge_types (name, color_code, icon)
-         VALUES ($1, $2, $3)
+        "INSERT INTO agoge_types (name, color_code, icon, category)
+         VALUES ($1, $2, $3, $4)
          RETURNING *",
     )
     .bind(name)
     .bind(body.color_code.unwrap_or_else(|| "#E53935".to_string()))
     .bind(body.icon.unwrap_or_else(|| "dumbbell".to_string()))
+    .bind(&category)
     .fetch_one(&pool)
     .await?;
     Ok((axum::http::StatusCode::CREATED, Json(ty)))
@@ -56,11 +73,13 @@ pub async fn update(
     Path(id): Path<Uuid>,
     Json(body): Json<UpsertType>,
 ) -> ApiResult<Json<AgogeType>> {
+    let category = normalize_category(body.category);
     let ty = sqlx::query_as::<_, AgogeType>(
         "UPDATE agoge_types
          SET name = $2,
              color_code = COALESCE($3, color_code),
-             icon = COALESCE($4, icon)
+             icon = COALESCE($4, icon),
+             category = $5
          WHERE id = $1
          RETURNING *",
     )
@@ -68,6 +87,7 @@ pub async fn update(
     .bind(body.name.trim())
     .bind(body.color_code)
     .bind(body.icon)
+    .bind(&category)
     .fetch_optional(&pool)
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("agoge type {id} not found")))?;

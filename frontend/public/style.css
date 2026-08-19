@@ -327,14 +327,20 @@ select { min-width: 120px; }
   margin-bottom: -2px;
 }
 .tab {
+  flex: 1 1 0;
   background: #030303; color: var(--muted);
-  border: 1px solid var(--line); padding: 7px 12px;
+  border: 1px solid var(--line); padding: 7px 6px;
   font-family: "Anton", "Arial Narrow", sans-serif;
-  letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer; font-size: 12px;
+  letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; font-size: 12px;
+  text-align: center;
+  white-space: nowrap;
 }
+.tab .en { display: none; }
+.tab:hover .gr { display: none; }
+.tab:hover .en { display: inline; }
 .tab:hover { border-color: var(--red); color: var(--red); }
 .tab.on { background: var(--red); color: #000; border-color: var(--red); }
-.sync-btn { margin-left: auto; }
+.sync-btn { margin-left: auto; flex: 0 0 auto; }
 
 /* ---------------- Dictionary tab hero ---------------- */
 
@@ -352,6 +358,13 @@ select { min-width: 120px; }
 }
 .th-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
 .th-title { font-family: "Anton", "Arial Narrow", sans-serif; font-size: 34px; color: var(--red); letter-spacing: 0.08em; text-transform: uppercase; line-height: 1; }
+.th-title .en { display: none; }
+.th-title:hover .gr { display: none; }
+.th-title:hover .en { display: inline; }
+
+/* Inline shield+lambda mark replacing the "O" in the wordmark. */
+.mark-o { display: inline-flex; height: 0.78em; width: 0.78em; vertical-align: -0.08em; }
+.mark-o svg { width: 100%; height: 100%; }
 .th-greek { font-size: 20px; color: var(--muted); letter-spacing: 0.1em; }
 .th-meta { display: flex; gap: 12px; margin: 4px 0 10px; }
 .th-pos { color: var(--red-bright); font-style: italic; font-size: 12px; }

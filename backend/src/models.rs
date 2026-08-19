@@ -13,6 +13,7 @@ pub struct AgogeType {
     pub name: String,
     pub color_code: String,
     pub icon: String,
+    pub category: String,
     pub created_at: DateTime<Utc>,
 }
 
