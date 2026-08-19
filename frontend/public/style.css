@@ -322,6 +322,61 @@ select { min-width: 120px; }
   width: 42px; min-width: 42px; padding: 2px; height: 34px;
 }
 
+/* ---------------- Tabs ---------------- */
+
+.tabs { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 10px 0 6px; }
+.tab {
+  background: #030303; color: var(--muted);
+  border: 1px solid var(--line); padding: 7px 12px;
+  font-family: "Anton", "Arial Narrow", sans-serif;
+  letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer; font-size: 12px;
+}
+.tab:hover { border-color: var(--red); color: var(--red); }
+.tab.on { background: var(--red); color: #000; border-color: var(--red); }
+.sync-btn { margin-left: auto; }
+
+/* ---------------- Dictionary tab hero ---------------- */
+
+.tab-hero {
+  border: 1px solid var(--line-strong);
+  background: linear-gradient(180deg, #0f0f0f, #080808);
+  padding: 18px 20px 16px;
+  margin-bottom: 16px;
+  position: relative;
+}
+.tab-hero::before {
+  content: "";
+  position: absolute; left: 0; top: 0; bottom: 0;
+  width: 3px; background: var(--red);
+}
+.th-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.th-title { font-family: "Anton", "Arial Narrow", sans-serif; font-size: 34px; color: var(--red); letter-spacing: 0.08em; text-transform: uppercase; line-height: 1; }
+.th-greek { font-size: 20px; color: var(--muted); letter-spacing: 0.1em; }
+.th-meta { display: flex; gap: 12px; margin: 4px 0 10px; }
+.th-pos { color: var(--red-bright); font-style: italic; font-size: 12px; }
+.th-ipa { color: var(--dim); font-style: italic; font-size: 12px; }
+.th-def { color: var(--text); font-size: 13px; line-height: 1.55; }
+.th-etym { color: var(--dim); font-size: 11px; margin-top: 8px; font-style: italic; }
+
+/* ---------------- Metrics summary ---------------- */
+
+.metric-val { color: var(--red); font-family: "Anton", "Arial Narrow", sans-serif; font-size: 15px; letter-spacing: 0.05em; }
+
+/* ---------------- Leonidas targets ---------------- */
+
+.target-row { display: grid; grid-template-columns: 170px 110px 1fr; gap: 12px; align-items: center; margin-bottom: 12px; }
+.target-row input { min-width: 0; width: 100%; }
+.bar { height: 14px; background: #0a0a0a; border: 1px solid var(--line); overflow: hidden; }
+.bar-fill { height: 100%; background: var(--red); }
+@media (max-width: 640px) { .target-row { grid-template-columns: 1fr; } }
+
+/* ---------------- Rank ladder ---------------- */
+
+.rank-ladder { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.rank-row { display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--line); padding: 10px 14px; background: var(--panel-2); }
+.rank-row.current { border-color: var(--red); background: var(--red-deep); }
+.rank-row.current .row-name { color: var(--red); }
+
 /* ---------------- Footer ---------------- */
 
 footer {
