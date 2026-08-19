@@ -344,6 +344,12 @@ select { min-width: 120px; }
 .config-actions { display: flex; gap: 10px; align-items: center; }
 .btn.danger { border-color: var(--red-dark); color: var(--red-bright); }
 .btn.danger:hover { background: var(--red-dark); color: #000; }
+
+/* ---------------- Skopos (activity log) ---------------- */
+
+.log-list { max-height: 520px; overflow-y: auto; }
+.log-kind { flex: 0 0 auto; width: 92px; color: var(--red); font-size: 10px; letter-spacing: 0.14em; }
+.log-msg { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 /* ---------------- Tabs ---------------- */
 
 .tabs {

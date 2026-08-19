@@ -22,6 +22,14 @@ struct StoredSettings {
 /// Time-range presets for the timeline buttons (label, days).
 const RANGES: &[(i64, &str)] = &[(1, "1D"), (7, "1W"), (30, "1M"), (365, "1Y")];
 
+#[derive(Clone)]
+struct LogEntry {
+    id: u64,
+    ts: f64,
+    kind: &'static str,
+    msg: String,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tab {
     Gymnasia,
@@ -34,10 +42,11 @@ enum Tab {
     Rank,
     Anapavsis,
     Nomoi,
+    Skopos,
 }
 
 impl Tab {
-    const ALL: [Tab; 10] = [
+    const ALL: [Tab; 11] = [
         Tab::Gymnasia,
         Tab::Agoges,
         Tab::Askesis,
@@ -48,6 +57,7 @@ impl Tab {
         Tab::Rank,
         Tab::Anapavsis,
         Tab::Nomoi,
+        Tab::Skopos,
     ];
 
     fn label(self) -> &'static str {
@@ -62,6 +72,7 @@ impl Tab {
             Tab::Rank => "Rank",
             Tab::Anapavsis => "Anapavsis",
             Tab::Nomoi => "Nomoi",
+            Tab::Skopos => "Skopos",
         }
     }
 
@@ -77,6 +88,7 @@ impl Tab {
             Tab::Rank => "τάξις",
             Tab::Anapavsis => "ἀνάπαυσις",
             Tab::Nomoi => "νόμοι",
+            Tab::Skopos => "σκοπός",
         }
     }
 
@@ -92,6 +104,7 @@ impl Tab {
             Tab::Rank => "/ták.sis/",
             Tab::Anapavsis => "/a.ná.pau̯.sis/",
             Tab::Nomoi => "/nó.moi/",
+            Tab::Skopos => "/sko.pós/",
         }
     }
 
@@ -114,6 +127,7 @@ impl Tab {
             Tab::Rank => "Station in the line. The ladder of workout success — Hoplite, Paidonomos, Mothax, Hippeis. Earn your rank through discipline, not birth.",
             Tab::Anapavsis => "Rest, refreshment, recovery. Your body battery: how much the night restored and how much the day's askesis drained.",
             Tab::Nomoi => "The laws — the customs of Lycurgus. The rules that govern this machine: API, token, AI providers.",
+            Tab::Skopos => "The watcher, the sentinel, the mark. Every API call, settings change, and interaction — watched and recorded, like the ephors watch the agoge.",
         }
     }
 
@@ -129,6 +143,7 @@ impl Tab {
             Tab::Rank => "From the Spartan military hierarchy.",
             Tab::Anapavsis => "From Greek anapausis, \"rest\".",
             Tab::Nomoi => "From Greek nomos, \"law, custom\".",
+            Tab::Skopos => "From Greek skopos, \"watcher, mark, aim\".",
         }
     }
 
@@ -144,6 +159,7 @@ impl Tab {
             Tab::Rank => "Ranks",
             Tab::Anapavsis => "Recovery",
             Tab::Nomoi => "Settings",
+            Tab::Skopos => "Logs",
         }
     }
 }
@@ -215,6 +231,18 @@ pub fn App() -> impl IntoView {
     let (ai_model, set_ai_model) = create_signal(String::new());
     let (ai_key, set_ai_key) = create_signal(String::new());
     let (body_energy, set_body_energy) = create_signal(None::<BodyEnergyDay>);
+    let (log, set_log) = create_signal(Vec::<LogEntry>::new());
+    let log_counter = create_rw_signal(0u64);
+    let log_event = move |kind: &'static str, msg: &str| {
+        let id = log_counter.get();
+        log_counter.set(id + 1);
+        set_log.update(|l| {
+            l.insert(0, LogEntry { id, ts: js_sys::Date::now(), kind, msg: msg.to_string() });
+            if l.len() > 300 {
+                l.truncate(300);
+            }
+        });
+    };
     let (current_tab, set_current_tab) = create_signal(Tab::Gymnasia);
     // Leonidas targets (persisted in settings).
     let (target_steps, set_target_steps) = create_signal(10_000i64);
@@ -240,6 +268,7 @@ pub fn App() -> impl IntoView {
                 "targets": targets,
             });
             let _ = put_settings(&base, &token, &body).await;
+            log_event("settings", "saved series/range/aiProvider/targets");
         });
     };
 
@@ -252,6 +281,7 @@ pub fn App() -> impl IntoView {
         let to_ms = js_sys::Date::now();
         let from_ms = to_ms - days as f64 * 86_400_000.0;
         let bucket = nice_bucket((to_ms - from_ms) / 1000.0 / 800.0);
+        log_event("api", &format!("sync · range {days}d"));
 
         spawn_local(async move {
             match fetch_timeline(&base, &token, from_ms, to_ms, &bucket).await {
@@ -417,7 +447,7 @@ pub fn App() -> impl IntoView {
         spawn_local(async move {
             let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category });
             match post_json(&base, &token, "/api/v1/agoge-types", &body).await {
-                Ok(_) => refresh(),
+                Ok(_) => { log_event("agoge", "created agoge"); refresh(); }
                 Err(e) => set_error.set(Some(e)),
             }
         });
@@ -430,6 +460,7 @@ pub fn App() -> impl IntoView {
             let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category });
             match put_json(&base, &token, &format!("/api/v1/agoge-types/{id}"), &body).await {
                 Ok(_) => {
+                    log_event("agoge", "updated agoge");
                     refresh();
                 }
                 Err(e) => set_error.set(Some(e)),
@@ -442,7 +473,7 @@ pub fn App() -> impl IntoView {
         let token = token.get();
         spawn_local(async move {
             match delete_json(&base, &token, &format!("/api/v1/agoge-types/{id}")).await {
-                Ok(_) => refresh(),
+                Ok(_) => { log_event("agoge", "deleted agoge"); refresh(); }
                 Err(e) => set_error.set(Some(e)),
             }
         });
@@ -453,7 +484,7 @@ pub fn App() -> impl IntoView {
         let token = token.get();
         spawn_local(async move {
             match accept_detection(&base, &token, &id).await {
-                Ok(_) => refresh(),
+                Ok(_) => { log_event("detection", "accepted workout"); refresh(); }
                 Err(e) => set_error.set(Some(e)),
             }
         });
@@ -464,7 +495,7 @@ pub fn App() -> impl IntoView {
         let token = token.get();
         spawn_local(async move {
             match reject_detection(&base, &token, &id).await {
-                Ok(_) => refresh(),
+                Ok(_) => { log_event("detection", "rejected workout"); refresh(); }
                 Err(e) => set_error.set(Some(e)),
             }
         });
@@ -494,6 +525,7 @@ pub fn App() -> impl IntoView {
                         set_error.set(Some(e));
                     }
                     set_ai_text.set(String::new());
+                    log_event("ai", &format!("logged nutrition via AI ({kind} {amount:.0})"));
                     refresh();
                 }
                 Err(e) => set_error.set(Some(e)),
@@ -519,6 +551,7 @@ pub fn App() -> impl IntoView {
                 set_error.set(Some(e));
             }
             set_manual_amount.set(String::new());
+            log_event("nutrition", &format!("logged {kind} {amount:.0}"));
             refresh();
         });
     };
@@ -543,7 +576,7 @@ pub fn App() -> impl IntoView {
                 {Tab::ALL.iter().map(|t| {
                     let t = *t;
                     view! {
-                        <button class="tab" class:on=move || current_tab.get() == t on:click=move |_| set_current_tab.set(t)>
+                        <button class="tab" class:on=move || current_tab.get() == t on:click=move |_| { set_current_tab.set(t); log_event("ui", &format!("tab → {}", t.label())); }>
                             <span class="gr">{t.label()}</span>
                             <span class="en">{t.english()}</span>
                         </button>
@@ -917,6 +950,24 @@ pub fn App() -> impl IntoView {
                             </div>
                             <p class="muted" style="margin-top:12px">"One OpenAI-compatible protocol for local (Ollama, LM Studio, llama.cpp) and remote providers — only the URL differs, so everything can stay on your machine."</p>
                             <button class="btn" style="margin-top:12px" on:click=move |_| persist_settings()>"SAVE"</button>
+                        </section>
+                    }.into_view(),
+                    Tab::Skopos => view! {
+                        <TabHero tab=Tab::Skopos />
+                        <section class="panel">
+                            <div class="panel-head">
+                                <h2>"SKOPOS — ACTIVITY LOG"</h2>
+                                <span class="muted">{move || format!("{} events", log.get().len())}</span>
+                            </div>
+                            <ul class="list log-list">
+                                <For each=move || log.get() key=|e| e.id let:e>
+                                    <li class="row log-row">
+                                        <span class="log-kind">{e.kind.to_uppercase()}</span>
+                                        <span class="log-msg">{e.msg.clone()}</span>
+                                        <span class="row-time">{fmt_time(e.ts)}</span>
+                                    </li>
+                                </For>
+                            </ul>
                         </section>
                     }.into_view(),
                 }
