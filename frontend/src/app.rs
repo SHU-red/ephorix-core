@@ -263,8 +263,8 @@ pub fn App() -> impl IntoView {
             <header class="header">
                 <div class="brand">
                     <div class="brand-row">
-                        <img class="brand-mark" src="/assets/helmet_black.png" alt="Spartan helmet" />
                         <h1>"EPHORIX"</h1>
+                        <img class="brand-mark" src="/assets/helmet_transparent.png" alt="Spartan helmet" />
                     </div>
                     <span class="sub">"ΑΓΩΓΗ · TRAINING COMMAND"</span>
                 </div>

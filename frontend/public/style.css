@@ -59,22 +59,28 @@ h1, h2 {
 
 .brand-row { display: flex; align-items: center; gap: 0; }
 
-/* Realistic helmet: height matches the EPHORIX text (64px); the wordmark
-   slides over its right edge (z-index above). */
+.brand-row { position: relative; display: inline-block; line-height: 0; }
+
+/* Transparent helmet: same height as the EPHORIX text (192px), behind the
+   wordmark. The image's horizontal center sits under the E's left edge, so
+   the E half-covers it (right half of the helmet hides behind the text). */
 .brand-mark {
-  height: 64px;
+  position: absolute;
+  top: 0;
+  left: -70px; /* half of the rendered helmet width (192 * 380/522 / 2) */
+  height: 192px;
   width: auto;
-  display: block;
-  position: relative;
   z-index: 0;
 }
-.brand-row h1 {
+
+.brand h1 {
+  font-size: 192px;
+  line-height: 1;
+  color: var(--red);
+  text-shadow: 0 0 24px rgba(229, 57, 53, 0.35);
   position: relative;
   z-index: 1;
-  margin-left: -24px;
 }
-
-.brand h1 { font-size: 64px; line-height: 1; color: var(--red); text-shadow: 0 0 24px rgba(229, 57, 53, 0.35); }
 .brand .sub { color: var(--muted); letter-spacing: 0.34em; font-size: 11px; }
 
 .controls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
