@@ -64,6 +64,8 @@ extern "C" {
     fn ephorix_clear_selection(id: u32);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = resetZoom)]
     fn ephorix_reset_zoom(id: u32);
+    #[wasm_bindgen(js_namespace = EphoriX, js_name = setZoomMode)]
+    fn ephorix_set_zoom_mode(id: u32, is_zoom: bool);
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +118,14 @@ pub fn TimelineChart(
         let id = chart_id.get();
         if id != 0 {
             ephorix_reset_zoom(id);
+        }
+    });
+
+    // Keep the bridge's drag-snapping mode in sync with the parent toggle.
+    create_effect(move |_| {
+        let id = chart_id.get();
+        if id != 0 {
+            ephorix_set_zoom_mode(id, zoom_mode.get());
         }
     });
     // One-time chart creation once the div is mounted. `get_untracked` keeps
@@ -210,7 +220,7 @@ fn build_opts(width: i32) -> serde_json::Value {
         "height": 380,
         "legend": { "show": true, "live": true },
         "cursor": { "show": true, "points": { "show": true } },
-        "select": { "show": true, "color": "rgba(229, 57, 53, 0.28)" },
+        "select": { "show": false },
         "scales": {
             "x": { "time": true },
             "y": { "range": [0, null] },
@@ -282,7 +292,13 @@ fn render_overlay(
             continue;
         }
         let x = ephorix_val_to_pos(chart_id, from);
-        let w = (ephorix_val_to_pos(chart_id, to) - x).abs().max(2.0);
+        let x2 = ephorix_val_to_pos(chart_id, to);
+        let left = x.min(x2).max(0.0);
+        let right = x.max(x2).min(bbox.width);
+        if right - left < 1.0 {
+            continue; // entirely off-screen (e.g. an open session past the data)
+        }
+        let w = right - left;
 
         let matched = s.type_id.as_ref().and_then(|tid| types.iter().find(|t| &t.id == tid));
         let color = matched.map(|t| t.color_code.clone()).unwrap_or_else(|| "#7B0000".to_string());
@@ -297,7 +313,7 @@ fn render_overlay(
         let _ = el.set_attribute("title", &format!("{name} · {} – {}", fmt_time(from), fmt_time(to)));
         let _ = el.set_attribute(
             "style",
-            &format!("position:absolute;top:0;bottom:0;left:{x}px;width:{w}px;background:{color};"),
+            &format!("position:absolute;top:0;bottom:0;left:{left}px;width:{w}px;background:{color};"),
         );
         let _ = container.append_child(&el);
     }
@@ -313,14 +329,20 @@ fn render_overlay(
         let wake = s.ts + WAKE_HOUR_MS;
         let from = wake - s.sleep_seconds * 1000.0;
         let x = ephorix_val_to_pos(chart_id, from);
-        let w = (ephorix_val_to_pos(chart_id, wake) - x).abs().max(2.0);
+        let x2 = ephorix_val_to_pos(chart_id, wake);
+        let left = x.min(x2).max(0.0);
+        let right = x.max(x2).min(bbox.width);
+        if right - left < 1.0 {
+            continue;
+        }
+        let w = right - left;
         let el = doc.create_element("div").unwrap().dyn_into::<web_sys::HtmlDivElement>().unwrap();
         el.set_class_name("sleep-band");
         let hrs = s.sleep_seconds / 3600.0;
         let _ = el.set_attribute("title", &format!("sleep {:.1}h (restful {:.1}h)", hrs, s.restful_seconds / 3600.0));
         let _ = el.set_attribute(
             "style",
-            &format!("position:absolute;left:{x}px;width:{w}px;bottom:0;height:14px;"),
+            &format!("position:absolute;left:{left}px;width:{w}px;bottom:0;height:14px;"),
         );
         let _ = container.append_child(&el);
     }
@@ -328,6 +350,9 @@ fn render_overlay(
     // Nutrition markers: small dots at the top edge (red = food, gray = water).
     for n in nutrition {
         let x = ephorix_val_to_pos(chart_id, n.ts);
+        if x < 0.0 || x > bbox.width {
+            continue;
+        }
         let color = if n.kind == "water" { "#8f8f8f" } else { "#ff5252" };
         let label = if n.kind == "water" {
             format!("water {:.0} ml", n.amount)

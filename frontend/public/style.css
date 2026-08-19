@@ -97,19 +97,19 @@ h1, h2, h3 {
    half-covering it. */
 .brand-mark {
   position: absolute;
-  top: 48px;
-  left: -35px;
-  height: 96px;
+  top: 24px;   /* (96 - 48) / 2, vertically centered against the text */
+  left: -17px; /* half of the rendered helmet width (48 * 380/522 / 2) */
+  height: 48px;
   width: auto;
   z-index: 0;
-  filter: drop-shadow(0 0 18px rgba(229, 57, 53, 0.25));
+  filter: drop-shadow(0 0 14px rgba(229, 57, 53, 0.25));
 }
 
 .brand h1 {
-  font-size: 192px;
+  font-size: 96px;
   line-height: 1;
   color: var(--red);
-  text-shadow: 0 0 32px rgba(229, 57, 53, 0.4), 0 2px 0 rgba(0, 0, 0, 0.6);
+  text-shadow: 0 0 22px rgba(229, 57, 53, 0.4), 0 2px 0 rgba(0, 0, 0, 0.6);
   position: relative;
   z-index: 1;
   letter-spacing: 0.06em;

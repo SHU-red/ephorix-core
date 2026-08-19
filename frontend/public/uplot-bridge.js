@@ -86,25 +86,118 @@
     }
   }
 
-  /* Direction-aware drag: reports the rectangle in data coords plus a
-     direction hint. Wider-than-tall => "x", taller-than-wide => "y",
-     roughly square => "both". The Rust side decides zoom vs select. */
+  var zoomModes = new Map();
+
+  function setZoomMode(id, isZoom) {
+    zoomModes.set(id, !!isZoom);
+  }
+
+  /* Custom drag with direction-aware visual feedback. The rectangle snaps to
+     the full opposite axis for single-axis zooms — a full-height band for a
+     horizontal (x) zoom, a full-width band for a vertical (y) zoom, and the
+     raw rectangle for area zoom — so the user sees exactly what section they
+     are grabbing. Reports data coords + direction on release. */
   function onDrag(id, cb) {
     var c = charts.get(id);
     if (!c) return;
-    c.hooks.setSelect = [function (u) {
-      var sel = u.select;
-      if (!sel || sel.width <= 0 || sel.height <= 0) return;
-      var ratio = sel.width / Math.max(1, sel.height);
-      var dir = ratio > 2 ? "x" : (ratio < 0.5 ? "y" : "both");
+
+    var root = c.root;
+    var overlay = null;
+    var dragging = false;
+    var startX = 0, startY = 0;
+
+    function ensureOverlay() {
+      if (overlay) return;
+      overlay = document.createElement("div");
+      overlay.style.position = "absolute";
+      overlay.style.pointerEvents = "none";
+      overlay.style.border = "1px solid #ff5252";
+      overlay.style.background = "rgba(229, 57, 53, 0.16)";
+      overlay.style.zIndex = "20";
+      overlay.style.display = "none";
+      root.appendChild(overlay);
+    }
+
+    function dirOf(dx, dy) {
+      var ratio = Math.abs(dx) / Math.max(1, Math.abs(dy));
+      return ratio > 2 ? "x" : (ratio < 0.5 ? "y" : "both");
+    }
+
+    function clamp(v, lo, hi) {
+      return Math.max(lo, Math.min(v, hi));
+    }
+
+    function draw(cx, cy) {
+      var dx = cx - startX, dy = cy - startY;
+      var dir = dirOf(dx, dy);
+      var b = c.bbox;
+      var l, t, w, h;
+      if (dir === "x") {
+        l = Math.min(startX, cx); w = Math.abs(dx); t = b.top; h = b.height;
+      } else if (dir === "y") {
+        l = b.left; w = b.width; t = Math.min(startY, cy); h = Math.abs(dy);
+      } else {
+        l = Math.min(startX, cx); w = Math.abs(dx); t = Math.min(startY, cy); h = Math.abs(dy);
+      }
+      var snap = zoomModes.get(id) !== false;
+      if (!snap) {
+        l = Math.min(startX, cx); w = Math.abs(dx); t = Math.min(startY, cy); h = Math.abs(dy);
+      }
+      overlay.style.left = clamp(l, b.left, b.left + b.width) + "px";
+      overlay.style.top = clamp(t, b.top, b.top + b.height) + "px";
+      overlay.style.width = Math.max(2, w) + "px";
+      overlay.style.height = Math.max(2, h) + "px";
+      overlay.style.display = "block";
+    }
+
+    root.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      ensureOverlay();
+      var r = root.getBoundingClientRect();
+      startX = e.clientX - r.left;
+      startY = e.clientY - r.top;
+      dragging = true;
+      e.preventDefault();
+    });
+
+    root.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      var r = root.getBoundingClientRect();
+      var cx = e.clientX - r.left, cy = e.clientY - r.top;
+      if (Math.abs(cx - startX) < 3 && Math.abs(cy - startY) < 3) return;
+      draw(cx, cy);
+    });
+
+    root.addEventListener("pointerup", function (e) {
+      if (!dragging) return;
+      dragging = false;
+      if (overlay) overlay.style.display = "none";
+      var r = root.getBoundingClientRect();
+      var cx = e.clientX - r.left, cy = e.clientY - r.top;
+      var dx = cx - startX, dy = cy - startY;
+      if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return; // click, not drag
+
+      var dir = dirOf(dx, dy);
+      var b = c.bbox;
+      var xlo = clamp(Math.min(startX, cx), b.left, b.left + b.width);
+      var xhi = clamp(Math.max(startX, cx), b.left, b.left + b.width);
+      var ylo = clamp(Math.min(startY, cy), b.top, b.top + b.height);
+      var yhi = clamp(Math.max(startY, cy), b.top, b.top + b.height);
+
+      var snap = zoomModes.get(id) !== false;
+      if (snap) {
+        if (dir === "x") { ylo = b.top; yhi = b.top + b.height; }
+        else if (dir === "y") { xlo = b.left; xhi = b.left + b.width; }
+      }
+
       cb(JSON.stringify({
-        x0: u.posToVal(sel.left, "x"),
-        x1: u.posToVal(sel.left + sel.width, "x"),
-        y0: u.posToVal(sel.top, "y"),
-        y1: u.posToVal(sel.top + sel.height, "y"),
-        dir: dir
+        x0: c.posToVal(xlo - b.left, "x"),
+        x1: c.posToVal(xhi - b.left, "x"),
+        y0: c.posToVal(ylo - b.top, "y"),
+        y1: c.posToVal(yhi - b.top, "y"),
+        dir: snap ? dir : "x"
       }));
-    }];
+    });
   }
 
   function zoomTo(id, x0, x1, y0, y1, dir) {
@@ -182,6 +275,7 @@
     destroy: destroy,
     onDrag: onDrag,
     zoomTo: zoomTo,
+    setZoomMode: setZoomMode,
     resetZoom: resetZoom,
     onCursor: onCursor,
     getSelection: getSelection,
