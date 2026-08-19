@@ -22,6 +22,10 @@ use crate::{
 pub enum MarkerKind {
     Start,
     Stop,
+    /// Informational: marks a rest period inside an open session. Does NOT
+    /// close the session — recorded for retro-analysis (rest detection).
+    Pause,
+    Resume,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,12 +68,23 @@ pub async fn ingest_marker(
     let occurred_at = occurred_at.unwrap_or_else(Utc::now);
     let source = source.unwrap_or_else(|| "watch".to_string());
 
-    let session = match kind {
-        MarkerKind::Start => start_session(&pool, user.0, type_id, type_name, occurred_at).await?,
-        MarkerKind::Stop => stop_session(&pool, user.0, session_id, occurred_at).await?,
+    let (session, kind) = match kind {
+        MarkerKind::Start => {
+            let s = start_session(&pool, user.0, type_id, type_name, occurred_at).await?;
+            (s, "start")
+        }
+        MarkerKind::Stop => {
+            let s = stop_session(&pool, user.0, session_id, occurred_at).await?;
+            (s, "stop")
+        }
+        MarkerKind::Pause | MarkerKind::Resume => {
+            // Informational marker tied to the open session; never closes it.
+            let s = open_session(&pool, user.0, session_id).await?;
+            (s, if kind == MarkerKind::Pause { "pause" } else { "resume" })
+        }
     };
 
-    insert_marker(&pool, user.0, session.id, &session, occurred_at, &source, meta).await?;
+    insert_marker(&pool, user.0, session.id, kind, occurred_at, &source, meta).await?;
     Ok(Json(session))
 }
 
@@ -136,11 +151,43 @@ async fn stop_session(
     Ok(session)
 }
 
+/// Resolves the session a marker should be attached to: the given one (if
+/// owned and open) or the user's latest open session.
+async fn open_session(
+    pool: &PgPool,
+    user_id: Uuid,
+    session_id: Option<Uuid>,
+) -> ApiResult<AgogeSession> {
+    if let Some(sid) = session_id {
+        let session = sqlx::query_as::<_, AgogeSession>(
+            "SELECT * FROM agoge_sessions WHERE id = $1 AND user_id = $2 AND status = 'active'",
+        )
+        .bind(sid)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| {
+            ApiError::NotFound("session not found, not owned, or not open".to_string())
+        })?;
+        Ok(session)
+    } else {
+        sqlx::query_as::<_, AgogeSession>(
+            "SELECT * FROM agoge_sessions
+             WHERE user_id = $1 AND status = 'active'
+             ORDER BY start_time DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("no open agoge session".to_string()))
+    }
+}
+
 async fn insert_marker(
     pool: &PgPool,
     user_id: Uuid,
     session_id: Uuid,
-    session: &AgogeSession,
+    kind: &str,
     occurred_at: DateTime<Utc>,
     source: &str,
     meta: Option<serde_json::Value>,
@@ -151,7 +198,7 @@ async fn insert_marker(
     )
     .bind(user_id)
     .bind(session_id)
-    .bind(if session.end_time.is_some() { "stop" } else { "start" })
+    .bind(kind)
     .bind(occurred_at)
     .bind(source)
     .bind(meta)

@@ -1,10 +1,26 @@
 //! Root application: header, timeline, sessions, types. Black/red Spartan UI.
+//! UI preferences (series visibility, range) are persisted in the backend
+//! DB (`user_settings`) — the web app needs no second volume.
 
 use leptos::*;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::api::*;
-use crate::timeline::TimelineChart;
+use crate::timeline::{SeriesConfig, TimelineChart};
+
+/// Fixed icon set for Agoge types (avoids free-form icon text breaking the UI).
+pub const TYPE_ICONS: [&str; 10] =
+    ["🏋️", "🚴", "🧗", "🏃", "🚣", "🤸", "🏊", "⛹️", "🥊", "❓"];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredSettings {
+    #[serde(default)]
+    series: Option<SeriesConfig>,
+    #[serde(default)]
+    range_days: Option<i64>,
+}
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -22,8 +38,31 @@ pub fn App() -> impl IntoView {
     let (error, set_error) = create_signal(None::<String>);
     let (loading, set_loading) = create_signal(false);
     let (selected_type, set_selected_type) = create_signal(None::<String>);
-    let (new_type_name, set_new_type_name) = create_signal(String::new());
     let (bucket_info, set_bucket_info) = create_signal(String::new());
+    let (series, set_series) = create_signal(SeriesConfig::default());
+    let (settings_loaded, set_settings_loaded) = create_signal(false);
+    let clear_sel = create_rw_signal(0u32);
+    let (editing_type, set_editing_type) = create_signal(None::<String>);
+
+    // Create-form state.
+    let (new_type_name, set_new_type_name) = create_signal(String::new());
+    let (new_type_color, set_new_type_color) = create_signal("#E53935".to_string());
+    let (new_type_icon, set_new_type_icon) = create_signal(TYPE_ICONS[0].to_string());
+
+    // Persist series visibility + range to the backend settings.
+    let persist_settings = move || {
+        let base = base.get();
+        let token = token.get();
+        let s = series.get();
+        let d = days.get();
+        spawn_local(async move {
+            let body = json!({
+                "series": s,
+                "rangeDays": d,
+            });
+            let _ = put_settings(&base, &token, &body).await;
+        });
+    };
 
     let refresh = move || {
         set_loading.set(true);
@@ -31,6 +70,7 @@ pub fn App() -> impl IntoView {
         let base = base.get();
         let token = token.get();
         let days = days.get();
+        let loaded = settings_loaded.get();
         let to_ms = js_sys::Date::now();
         let from_ms = to_ms - days as f64 * 86_400_000.0;
         let bucket = nice_bucket((to_ms - from_ms) / 1000.0 / 800.0);
@@ -47,6 +87,20 @@ pub fn App() -> impl IntoView {
             match fetch_types(&base, &token).await {
                 Ok(t) => set_types.set(t),
                 Err(e) => set_error.set(Some(e)),
+            }
+            // Settings load once per session (do not clobber user changes).
+            if !loaded {
+                if let Ok(sv) = fetch_settings(&base, &token).await {
+                    if let Ok(stored) = serde_json::from_value::<StoredSettings>(sv) {
+                        if let Some(sc) = stored.series {
+                            set_series.set(sc);
+                        }
+                        if let Some(rd) = stored.range_days {
+                            set_days.set(rd);
+                        }
+                        set_settings_loaded.set(true);
+                    }
+                }
             }
             set_loading.set(false);
         });
@@ -78,12 +132,18 @@ pub fn App() -> impl IntoView {
         spawn_local(async move {
             match post_json(&base, &token, "/api/v1/agoge-sessions", &body).await {
                 Ok(_) => {
+                    clear_sel.set(clear_sel.get() + 1);
                     set_selection.set(None);
                     refresh();
                 }
                 Err(e) => set_error.set(Some(e)),
             }
         });
+    };
+
+    let clear_selection = move |_| {
+        clear_sel.set(clear_sel.get() + 1);
+        set_selection.set(None);
     };
 
     let close_open_at_cursor = move |_| {
@@ -122,6 +182,23 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let toggle_series = move |key: &'static str| {
+        let mut s = series.get();
+        match key {
+            "heartRate" => s.heart_rate = !s.heart_rate,
+            "steps" => s.steps = !s.steps,
+            "calories" => s.calories = !s.calories,
+            _ => {}
+        }
+        set_series.set(s);
+        persist_settings();
+    };
+
+    let set_range = move |ev: web_sys::Event| {
+        set_days.set(event_target_value(&ev).parse().unwrap_or(7));
+        persist_settings();
+    };
+
     let delete_session = move |id: String| {
         let base = base.get();
         let token = token.get();
@@ -133,6 +210,8 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // -- Agoge types CRUD ----------------------------------------------------
+
     let add_type = move |_| {
         let name = new_type_name.get().trim().to_string();
         if name.is_empty() {
@@ -140,10 +219,28 @@ pub fn App() -> impl IntoView {
         }
         let base = base.get();
         let token = token.get();
+        let color = new_type_color.get();
+        let icon = new_type_icon.get();
         spawn_local(async move {
-            match post_json(&base, &token, "/api/v1/agoge-types", &json!({ "name": name })).await {
+            let body = json!({ "name": name, "colorCode": color, "icon": icon });
+            match post_json(&base, &token, "/api/v1/agoge-types", &body).await {
                 Ok(_) => {
                     set_new_type_name.set(String::new());
+                    refresh();
+                }
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    };
+
+    let update_type = move |id: String, name: String, color: String, icon: String| {
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            let body = json!({ "name": name, "colorCode": color, "icon": icon });
+            match put_json(&base, &token, &format!("/api/v1/agoge-types/{id}"), &body).await {
+                Ok(_) => {
+                    set_editing_type.set(None);
                     refresh();
                 }
                 Err(e) => set_error.set(Some(e)),
@@ -169,7 +266,7 @@ pub fn App() -> impl IntoView {
             <header class="header">
                 <div class="brand">
                     <h1>"EPHORIX"</h1>
-                    <span class="sub">"ΑΓΩΓΗ · TRAINING COMMAND"</span>
+                    <span class="sub">"AGOGE · TRAINING COMMAND"</span>
                 </div>
                 <div class="controls">
                     <label class="ctl">
@@ -191,9 +288,7 @@ pub fn App() -> impl IntoView {
                     </label>
                     <label class="ctl">
                         "RANGE"
-                        <select
-                            on:change=move |ev| set_days.set(event_target_value(&ev).parse().unwrap_or(7))
-                        >
+                        <select on:change=set_range>
                             <option value="1">"1 DAY"</option>
                             <option value="3">"3 DAYS"</option>
                             <option value="7" selected>"7 DAYS"</option>
@@ -213,7 +308,7 @@ pub fn App() -> impl IntoView {
             <main>
                 <section class="panel">
                     <div class="panel-head">
-                        <h2>"RAW METRICS / AG OGE OVERLAY"</h2>
+                        <h2>"RAW METRICS / AGOGE OVERLAY"</h2>
                         <span class="muted">
                             {move || {
                                 let pts = points.get();
@@ -230,12 +325,17 @@ pub fn App() -> impl IntoView {
                         points=points
                         sessions=sessions
                         types=types
+                        series=series
                         selection=set_selection
                         cursor=set_cursor
+                        clear_trigger=clear_sel
                     />
                     <div class="timeline-actions">
                         <button class="btn" on:click=create_from_selection>
                             "CREATE SESSION FROM SELECTION"
+                        </button>
+                        <button class="btn" on:click=clear_selection>
+                            "CLEAR SELECTION"
                         </button>
                         <button class="btn" on:click=close_open_at_cursor>
                             "CLOSE OPEN AT CURSOR"
@@ -252,6 +352,32 @@ pub fn App() -> impl IntoView {
                                     <option value=t.id.clone()>{t.name.clone()}</option>
                                 </For>
                             </select>
+                        </label>
+                        <span class="muted selection-readout">
+                            "SELECTION: "
+                            {move || {
+                                selection.get().map(|(f, t)| {
+                                    format!("{} → {}", fmt_time(f.min(t)), fmt_time(f.max(t)))
+                                }).unwrap_or_else(|| "—".to_string())
+                            }}
+                        </span>
+                    </div>
+                    <div class="series-toggles">
+                        <span class="muted">"SHOW:"</span>
+                        <label class="chk">
+                            <input type="checkbox" prop:checked=move || series.get().heart_rate
+                                on:change=move |_| toggle_series("heartRate") />
+                            "HEART RATE"
+                        </label>
+                        <label class="chk">
+                            <input type="checkbox" prop:checked=move || series.get().steps
+                                on:change=move |_| toggle_series("steps") />
+                            "STEPS"
+                        </label>
+                        <label class="chk">
+                            <input type="checkbox" prop:checked=move || series.get().calories
+                                on:change=move |_| toggle_series("calories") />
+                            "ACTIVE KCAL"
                         </label>
                         <span class="muted cursor-readout">
                             "CURSOR: "
@@ -292,18 +418,45 @@ pub fn App() -> impl IntoView {
                                 key=|t| t.id.clone()
                                 let:t
                             >
-                                <TypeRow
-                                    ty=t
-                                    on_delete=Callback::new(move |id: String| delete_type(id))
-                                />
+                                {move || {
+                                    let t_edit = t.clone();
+                                    let t_edit_id = t_edit.id.clone();
+                                    let t_view = t.clone();
+                                    if editing_type.get().as_ref() == Some(&t.id) {
+                                        view! {
+                                            <TypeEditRow
+                                                ty=t_edit
+                                                on_save=Callback::new(move |(n, c, i): (String, String, String)| update_type(t_edit_id.clone(), n, c, i))
+                                                on_cancel=Callback::new(move |_| set_editing_type.set(None))
+                                            />
+                                        }.into_view()
+                                    } else {
+                                        view! {
+                                            <TypeRow
+                                                ty=t_view
+                                                on_edit=Callback::new(move |id: String| set_editing_type.set(Some(id)))
+                                                on_delete=Callback::new(move |id: String| delete_type(id))
+                                            />
+                                        }.into_view()
+                                    }
+                                }}
                             </For>
                         </ul>
-                        <div class="inline-form">
+                        <div class="type-create">
                             <input
                                 prop:value=new_type_name
                                 on:input=move |ev| set_new_type_name.set(event_target_value(&ev))
                                 placeholder="NEW TYPE NAME"
+                                maxlength="40"
                             />
+                            <input type="color" prop:value=new_type_color
+                                on:input=move |ev| set_new_type_color.set(event_target_value(&ev)) />
+                            <select prop:value=new_type_icon
+                                on:change=move |ev| set_new_type_icon.set(event_target_value(&ev))>
+                                <For each=move || TYPE_ICONS.to_vec() key=|i| i.to_string() let:i>
+                                    <option value={i}>{i}</option>
+                                </For>
+                            </select>
                             <button class="btn" on:click=add_type>"ADD"</button>
                         </div>
                     </section>
@@ -321,6 +474,29 @@ pub fn App() -> impl IntoView {
 fn option_value(ev: &web_sys::Event) -> Option<String> {
     let val = event_target_value(ev);
     if val.is_empty() { None } else { Some(val) }
+}
+
+/// Icon display: DB may hold legacy text names (seed data) or emoji from the
+/// picker; anything unknown falls back to a question mark.
+fn display_icon(icon: &str) -> String {
+    match icon {
+        "dumbbell" => "🏋️".to_string(),
+        "bicycle" => "🚴".to_string(),
+        "mountain" => "🧗".to_string(),
+        "runner" => "🏃".to_string(),
+        "rowing" => "🚣".to_string(),
+        "swim" | "swimming" => "🏊".to_string(),
+        "gymnastics" => "🤸".to_string(),
+        "basketball" => "⛹️".to_string(),
+        "boxing" => "🥊".to_string(),
+        other => {
+            if TYPE_ICONS.contains(&other) {
+                other.to_string()
+            } else {
+                "❓".to_string()
+            }
+        }
+    }
 }
 
 /// One session row. Fields are computed eagerly per For iteration; the
@@ -365,20 +541,65 @@ fn SessionRow(
     }
 }
 
-/// One Agoge Type row.
+/// One Agoge Type row (icon + name + color + edit/delete).
 #[component]
-fn TypeRow(ty: AgogeType, on_delete: Callback<String>) -> impl IntoView {
+fn TypeRow(
+    ty: AgogeType,
+    on_edit: Callback<String>,
+    on_delete: Callback<String>,
+) -> impl IntoView {
     let id = ty.id.clone();
+    let id_edit = id.clone();
+    let id_del = id.clone();
     let name = ty.name.clone();
-    let icon = ty.icon.clone();
+    let icon = display_icon(&ty.icon);
     let color = ty.color_code.clone();
     view! {
         <li class="row">
             <span class="dot" style=format!("background:{color}")></span>
+            <span class="row-icon">{icon}</span>
             <span class="row-name">{name}</span>
-            <span class="row-time muted">{icon}</span>
-            <button class="btn small" on:click=move |_| on_delete.call(id.clone())>
+            <button class="btn small" on:click=move |_| on_edit.call(id_edit.clone())>
+                "EDIT"
+            </button>
+            <button class="btn small" on:click=move |_| on_delete.call(id_del.clone())>
                 "DELETE"
+            </button>
+        </li>
+    }
+}
+
+/// Inline edit form for one Agoge Type.
+#[component]
+fn TypeEditRow(
+    ty: AgogeType,
+    on_save: Callback<(String, String, String)>,
+    on_cancel: Callback<()>,
+) -> impl IntoView {
+    let (name, set_name) = create_signal(ty.name.clone());
+    let (color, set_color) = create_signal(ty.color_code.clone());
+    let (icon, set_icon) = create_signal(ty.icon.clone());
+    view! {
+        <li class="row edit">
+            <input
+                prop:value=name
+                on:input=move |ev| set_name.set(event_target_value(&ev))
+                maxlength="40"
+            />
+            <input type="color" prop:value=color
+                on:input=move |ev| set_color.set(event_target_value(&ev)) />
+            <select prop:value=icon
+                on:change=move |ev| set_icon.set(event_target_value(&ev))>
+                <For each=move || TYPE_ICONS.to_vec() key=|i| i.to_string() let:i>
+                    <option value={i}>{i}</option>
+                </For>
+            </select>
+            <button class="btn small"
+                on:click=move |_| on_save.call((name.get(), color.get(), icon.get()))>
+                "SAVE"
+            </button>
+            <button class="btn small" on:click=move |_| on_cancel.call(())>
+                "CANCEL"
             </button>
         </li>
     }

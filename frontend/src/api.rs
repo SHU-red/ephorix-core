@@ -4,7 +4,7 @@
 use gloo_net::http::Request;
 use js_sys::Date;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use wasm_bindgen::JsValue;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -125,8 +125,38 @@ pub async fn fetch_timeline(
     serde_json::from_value(v).map_err(|e| format!("timeline decode: {e}"))
 }
 
+pub async fn fetch_settings(base: &str, token: &str) -> Result<Value, String> {
+    let v = Request::get(&format!("{base}/api/v1/settings"))
+        .header("X-EphoriX-Token", token)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("invalid json: {e}"))?;
+    Ok(v["settings"].clone())
+}
+
+pub async fn put_settings(base: &str, token: &str, settings: &Value) -> Result<Value, String> {
+    let req = Request::put(&format!("{base}/api/v1/settings"))
+        .header("X-EphoriX-Token", token)
+        .json(&json!({ "settings": settings }))
+        .map_err(|e| format!("serialize body: {e}"))?;
+    let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
+    check(resp).await
+}
+
 pub async fn post_json(base: &str, token: &str, path: &str, body: &Value) -> Result<Value, String> {
     let req = Request::post(&format!("{base}{path}"))
+        .header("X-EphoriX-Token", token)
+        .json(body)
+        .map_err(|e| format!("serialize body: {e}"))?;
+    let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
+    check(resp).await
+}
+
+pub async fn put_json(base: &str, token: &str, path: &str, body: &Value) -> Result<Value, String> {
+    let req = Request::put(&format!("{base}{path}"))
         .header("X-EphoriX-Token", token)
         .json(body)
         .map_err(|e| format!("serialize body: {e}"))?;

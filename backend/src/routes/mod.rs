@@ -2,6 +2,7 @@ pub mod agoge_sessions;
 pub mod agoge_types;
 pub mod events;
 pub mod health;
+pub mod settings;
 pub mod timeline;
 
 use axum::{
@@ -64,6 +65,10 @@ pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
             patch(agoge_sessions::update).delete(agoge_sessions::delete),
         )
         .route("/api/v1/timeline", get(timeline::get_timeline))
+        .route(
+            "/api/v1/settings",
+            get(settings::get_settings).put(settings::put_settings),
+        )
         .route_layer(middleware::from_fn_with_state(pool.clone(), auth::require_auth));
 
     Router::new()

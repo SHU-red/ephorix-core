@@ -41,6 +41,12 @@
     if (c) c.setData(JSON.parse(dataJson));
   }
 
+  /* Show/hide one series (1-based: 1=HR, 2=Steps, 3=kcal). */
+  function setSeriesShow(id, seriesIdx, show) {
+    var c = charts.get(id);
+    if (c) c.setSeries(seriesIdx, { show: !!show });
+  }
+
   function destroy(id) {
     var c = charts.get(id);
     if (c) {
@@ -113,6 +119,7 @@
   global.EphoriX = {
     create: create,
     setData: setData,
+    setSeriesShow: setSeriesShow,
     destroy: destroy,
     onSelect: onSelect,
     onCursor: onCursor,

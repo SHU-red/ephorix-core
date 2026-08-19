@@ -46,16 +46,17 @@ Response `201`:
 
 Discrete event from the watch (or web). The backend materializes the session:
 `start` → creates an `active` session; `stop` → closes it (by `sessionId` or the
-latest open one). Unknown/missing type → session recorded as **Undefined Agoge**
-(`typeId: null`).
+latest open one). `pause` / `resume` are informational rest-period markers —
+recorded against the open session, never closing it. Unknown/missing type →
+session recorded as **Undefined Agoge** (`typeId: null`).
 
 ```jsonc
 {
-  "kind": "start",                        // "start" | "stop"
-  "typeId": "11111111-1111-1111-1111-111111111111", // optional UUID
+  "kind": "start",                        // "start" | "stop" | "pause" | "resume"
+  "typeId": "11111111-1111-1111-1111-111111111111", // optional UUID (start only)
   "typeName": "Strength",                 // optional fallback lookup
   "occurredAt": "2026-08-18T09:30:00Z",   // optional, defaults to now()
-  "sessionId": "22222222-2222-2222-2222-222222222222", // optional, for stop
+  "sessionId": "22222222-2222-2222-2222-222222222222", // optional, for stop/pause/resume
   "source": "watch",                      // "watch" | "web"
   "meta": { "batteryPercent": 81 }        // optional, free-form
 }
@@ -146,6 +147,18 @@ periods) can re-process the raw stream freely.
 
 ---
 
-## 6. Health
+## 6. Settings (stored in the DB — no second volume)
+
+### `GET /api/v1/settings`
+```json
+{ "settings": { "series": { "heartRate": true, "steps": true, "calories": true }, "rangeDays": 7 } }
+```
+
+### `PUT /api/v1/settings` — body `{ "settings": { ... } }`
+
+Free-form JSONB per user; unknown keys are preserved. The web UI persists
+series visibility and the timeline range here.
+
+## 7. Health
 
 ### `GET /healthz` → `200 "ok"` (no auth, for orchestration probes)
