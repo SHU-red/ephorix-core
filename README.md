@@ -94,15 +94,16 @@ builds the `api` and `web` images and pushes them to GHCR:
 Deploy from the registry (no toolchain needed on the server):
 
 ```bash
-# .env: EPHORIX_API_IMAGE=ghcr.io/shu-red/ephorix-api:latest
-#       EPHORIX_WEB_IMAGE=ghcr.io/shu-red/ephorix-web:latest
+# .env: EPHORIX_API_TAG=latest
+#       EPHORIX_WEB_TAG=latest
 docker compose pull
 docker compose up -d
 ```
 
-For a dev server following main: set the image vars to `:dev-main` (or a
-specific `:dev-<sha>`), then the same pull + up. `docker compose up --build`
-still builds locally from the repo when you want that.
+For a dev server following main: set `EPHORIX_API_TAG`/`EPHORIX_WEB_TAG` to
+`dev-main` (or a specific `dev-<sha>`), then the same pull + up.
+`docker compose up --build` still builds locally from the repo when you want
+that.
 
 The timescaledb database image is upstream and not CI-built.
 

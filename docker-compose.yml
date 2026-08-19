@@ -23,7 +23,7 @@ services:
   # --- API: internal only. No host port — reachable exclusively through the
   # web service's /api proxy.
   api:
-    image: ${EPHORIX_API_IMAGE:-ghcr.io/shu-red/ephorix-api:latest}
+    image: ghcr.io/shu-red/ephorix-api:${EPHORIX_API_TAG:-latest}
     build:
       context: ./backend
     container_name: ephorix-api
@@ -46,7 +46,7 @@ services:
   # /healthz to the API (same-origin, no CORS). The watch uses this port as
   # its base URL too (POST /api/v1/health/batch, /api/v1/events/marker, ...).
   web:
-    image: ${EPHORIX_WEB_IMAGE:-ghcr.io/shu-red/ephorix-web:latest}
+    image: ghcr.io/shu-red/ephorix-web:${EPHORIX_WEB_TAG:-latest}
     build:
       context: ./frontend
     container_name: ephorix-web
