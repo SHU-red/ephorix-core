@@ -63,24 +63,6 @@ pub const LAMBDA: &str = concat!(
     r##"</svg>"##,
 );
 
-/// Plumed Corinthian helmet — the header hero mark.
-pub const HELMET: &str = concat!(
-    r##"<svg viewBox="0 0 40 32" fill="none" stroke="#E53935" stroke-width="2" stroke-linecap="square" stroke-linejoin="round">"##,
-    // crest (filled plume)
-    r##"<path d="M11 11 C 14 3, 26 3, 29 11 C 26 8, 14 8, 11 11 Z" fill="#E53935" stroke="none"/>"##,
-    // dome
-    r##"<path d="M8 17 C 8 9, 32 9, 32 17"/>"##,
-    // cheek guards
-    r##"<path d="M8 17 L5 26"/>"##,
-    r##"<path d="M32 17 L35 26"/>"##,
-    // nose guard
-    r##"<path d="M20 9 L20 23"/>"##,
-    // eye slits
-    r##"<path d="M12 14 L17 14"/>"##,
-    r##"<path d="M23 14 L28 14"/>"##,
-    r##"</svg>"##,
-);
-
 /// Aspis (round Spartan shield).
 pub const SHIELD: &str = concat!(
     r##"<svg viewBox="0 0 24 24" fill="none" stroke="#E53935" stroke-width="1.8" stroke-linejoin="round">"##,

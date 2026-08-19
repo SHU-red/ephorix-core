@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::api::*;
-use crate::icons::{glyph_key, glyph_svg, GLYPH_KEYS, HELMET, LAMBDA};
+use crate::icons::{glyph_key, glyph_svg, GLYPH_KEYS, LAMBDA};
 use crate::timeline::{SeriesConfig, TimelineChart};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,7 +263,7 @@ pub fn App() -> impl IntoView {
             <header class="header">
                 <div class="brand">
                     <div class="brand-row">
-                        <span class="brand-mark" inner_html=HELMET></span>
+                        <img class="brand-mark" src="/assets/helmet_black.png" alt="Spartan helmet" />
                         <h1>"EPHORIX"</h1>
                     </div>
                     <span class="sub">"ΑΓΩΓΗ · TRAINING COMMAND"</span>
