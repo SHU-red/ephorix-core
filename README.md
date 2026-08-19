@@ -79,6 +79,33 @@ does the same. Type a full URL in the BASE field to override (e.g. direct
 API access without a proxy). Drag on the timeline to select a range →
 "CREATE SESSION FROM SELECTION"; hover to a time → "CLOSE OPEN AT CURSOR".
 
+## CI / CD (images on GHCR)
+
+Pushes to `main` and `v*` tags trigger `.github/workflows/build.yml`, which
+builds the `api` and `web` images and pushes them to GHCR:
+
+| Trigger | Tags |
+|---|---|
+| push to `main` | `dev-<short-sha>` (immutable) + `dev-main` (rolling) |
+| tag `vX.Y.Z` | `latest` + `vX.Y.Z` + `X.Y` |
+
+`latest` is **only** produced by release tags, never by main pushes.
+
+Deploy from the registry (no toolchain needed on the server):
+
+```bash
+# .env: EPHORIX_API_IMAGE=ghcr.io/shu-red/ephorix-api:latest
+#       EPHORIX_WEB_IMAGE=ghcr.io/shu-red/ephorix-web:latest
+docker compose pull
+docker compose up -d
+```
+
+For a dev server following main: set the image vars to `:dev-main` (or a
+specific `:dev-<sha>`), then the same pull + up. `docker compose up --build`
+still builds locally from the repo when you want that.
+
+The timescaledb database image is upstream and not CI-built.
+
 ## Deploying to a server
 
 The watch does **not** need the frontend — it talks to the API on the same
