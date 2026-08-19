@@ -2,7 +2,7 @@
 # Builds the api + web images locally and publishes them to GitHub Packages
 # (GHCR) under the shu-red/ephorix-* names.
 #
-# Tagging (mirrors .github/workflows/build.yml):
+# Tagging scheme:
 #   no args                 -> dev build:  dev (rolling) + dev-<short-sha>
 #   ./publish.sh vX.Y.Z     -> release:    latest + vX.Y.Z + X.Y + <short-sha>
 #

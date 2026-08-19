@@ -79,19 +79,32 @@ does the same. Type a full URL in the BASE field to override (e.g. direct
 API access without a proxy). Drag on the timeline to select a range →
 "CREATE SESSION FROM SELECTION"; hover to a time → "CLOSE OPEN AT CURSOR".
 
-## CI / CD (images on GHCR)
+## Images (GHCR, built locally)
 
-Pushes to `main` and `v*` tags trigger `.github/workflows/build.yml`, which
-builds the `api` and `web` images and pushes them to GHCR:
+Images are always built on your machine and pushed to GitHub Packages —
+no CI. `scripts/publish.sh` applies the tagging scheme:
 
-| Trigger | Tags |
+| Build | Tags on `ghcr.io/shu-red/ephorix-{api,web}` |
 |---|---|
-| push to `main` | `dev` (rolling) + `dev-<short-sha>` (lock) |
-| tag `vX.Y.Z` | `latest` (rolling) + `vX.Y.Z` + `X.Y` + `<short-sha>` (lock) |
+| `./scripts/publish.sh` (dev) | `dev` (rolling) + `dev-<short-sha>` (lock) |
+| `./scripts/publish.sh vX.Y.Z` (release) | `latest` (rolling) + `vX.Y.Z` + `X.Y` + `<short-sha>` (lock) |
 
-`latest` is **only** produced by release tags, `dev` only by main pushes.
-Every build is additionally tagged with its commit, so any deployed version
-can be locked by sha.
+`latest` is only produced by release builds, `dev` only by dev builds. Every
+build is additionally tagged with its commit, so any deployed version can be
+locked by sha.
+
+```bash
+docker login ghcr.io -u <user> -p <PAT>   # PAT scope: write:packages
+./scripts/publish.sh --no-push            # build + tag only, smoke-test first
+./scripts/publish.sh                      # build + push
+```
+
+The frontend image build takes a few minutes (it installs trunk +
+wasm-bindgen-cli inside the builder). Equivalent one-liner via compose:
+
+```bash
+EPHORIX_TAG=dev docker compose build && EPHORIX_TAG=dev docker compose push
+```
 
 Deploy from the registry (no toolchain needed on the server):
 
@@ -101,31 +114,7 @@ docker compose pull
 docker compose up -d
 ```
 
-For a dev server following main: set `EPHORIX_TAG=dev` (or a specific
-`dev-<sha>`), then the same pull + up. `docker compose up --build` still
-builds locally from the repo when you want that.
-
-The timescaledb database image is upstream and not CI-built.
-
-### Publishing manually (build locally, push to GHCR)
-
-Prefer building on your own machine when you want to see failures and
-smoke-test before anything reaches the registry:
-
-```bash
-docker login ghcr.io -u <user> -p <PAT>   # PAT scope: write:packages
-./scripts/publish.sh                      # dev build: dev + dev-<sha>
-./scripts/publish.sh --no-push            # build + tag only, smoke-test first
-./scripts/publish.sh v1.2.3               # release: latest + v1.2.3 + 1.2 + <sha>
-```
-
-`scripts/publish.sh` applies the same tagging scheme as the CI workflow.
-The frontend image build takes a few minutes (it installs trunk +
-wasm-bindgen-cli inside the builder). Equivalent one-liner via compose:
-
-```bash
-EPHORIX_TAG=dev docker compose build && EPHORIX_TAG=dev docker compose push
-```
+The timescaledb database image is upstream and never built.
 
 ## Deploying to a server
 
