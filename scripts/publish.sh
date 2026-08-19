@@ -16,7 +16,8 @@
 set -euo pipefail
 
 REGISTRY="ghcr.io/shu-red"
-IMAGES=(api:backend web:frontend)
+# Package names MUST match the compose image: fields (ephorix-api, ephorix-web).
+IMAGES=(ephorix-api:backend ephorix-web:frontend)
 NO_PUSH=0
 
 if [[ "${1:-}" == "--no-push" ]]; then
