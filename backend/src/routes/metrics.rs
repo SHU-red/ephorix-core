@@ -26,6 +26,7 @@ const MAX_RECHARGE: f64 = 300.0;
 const DRAIN_PER_KCAL: f64 = 0.12;
 const DRAIN_PER_10K_STEPS: f64 = 50.0;
 const DRAIN_PER_STRESS: f64 = 1.5;
+const DRAIN_PER_MOVE: f64 = 0.005; // movement intensity (au) → battery points
 const STRESS_RESTING_HR: f64 = 55.0; // bpm below which stress is 0
 const STRESS_FULL_HR: f64 = 120.0;   // bpm above which stress is 100
 
@@ -116,6 +117,91 @@ pub async fn body_battery(
     }
 
     Ok(Json(json!({ "days": points })))
+}
+
+// --- live body-battery series (integral over time) -------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct SeriesQuery {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    #[serde(default)]
+    pub bucket: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct SeriesBucket {
+    ts: f64,
+    sleep_s: f64,
+    kcal: f64,
+    steps: f64,
+    movement: f64,
+    avg_hr: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatterySeriesPoint {
+    ts: f64,      // epoch ms
+    stress: f64,  // 0..100
+    battery: f64, // 0..300
+}
+
+/// A continuous ("always live") body battery: a running integral over time
+/// buckets. Sleep recharges, activity (kcal/steps/movement) and stress (HR
+/// strain) discharge; the value is clamped to 0..300 each step.
+pub async fn body_battery_series(
+    State(pool): State<PgPool>,
+    Extension(user): Extension<AuthUser>,
+    Query(q): Query<SeriesQuery>,
+) -> ApiResult<Json<Value>> {
+    if q.to <= q.from {
+        return Err(ApiError::BadRequest("'to' must be after 'from'".to_string()));
+    }
+    if (q.to - q.from) > Duration::days(366) {
+        return Err(ApiError::BadRequest("range exceeds 366 days".to_string()));
+    }
+    let bucket = q.bucket.unwrap_or_else(|| "1 hour".to_string());
+
+    let rows: Vec<SeriesBucket> = sqlx::query_as(
+        "SELECT
+            (EXTRACT(EPOCH FROM time_bucket($1::interval, ts)) * 1000)::float8 AS ts,
+            COALESCE(SUM(value) FILTER (WHERE metric = 'sleep_seconds'), 0)::float8 AS sleep_s,
+            COALESCE(SUM(value) FILTER (WHERE metric = 'active_calories'), 0)::float8 AS kcal,
+            COALESCE(SUM(value) FILTER (WHERE metric = 'steps'), 0)::float8 AS steps,
+            COALESCE(SUM(value) FILTER (WHERE metric = 'movement_intensity'), 0)::float8 AS movement,
+            COALESCE(AVG(value) FILTER (WHERE metric = 'heart_rate'), 0)::float8 AS avg_hr
+         FROM measurements
+         WHERE user_id = $2 AND ts >= $3 AND ts < $4
+           AND metric IN ('sleep_seconds', 'active_calories', 'steps', 'movement_intensity', 'heart_rate')
+         GROUP BY 1
+         ORDER BY 1",
+    )
+    .bind(&bucket)
+    .bind(user.0)
+    .bind(q.from)
+    .bind(q.to)
+    .fetch_all(&pool)
+    .await?;
+
+    let mut battery = 300.0;
+    let mut points = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let stress = if r.avg_hr > STRESS_RESTING_HR {
+            ((r.avg_hr - STRESS_RESTING_HR) / (STRESS_FULL_HR - STRESS_RESTING_HR) * 100.0)
+                .clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+        let recharge = r.sleep_s / 3600.0 * RECHARGE_PER_HOUR;
+        let drain = r.kcal * DRAIN_PER_KCAL
+            + r.steps / 10_000.0 * DRAIN_PER_10K_STEPS
+            + r.movement * DRAIN_PER_MOVE;
+        battery = (battery + recharge - drain - stress * DRAIN_PER_STRESS).clamp(0.0, 300.0);
+        points.push(BatterySeriesPoint { ts: r.ts, stress, battery });
+    }
+
+    Ok(Json(json!({ "series": points })))
 }
 
 // --- workout detection + acceptance -----------------------------------------

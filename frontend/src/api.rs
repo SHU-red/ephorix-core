@@ -280,3 +280,34 @@ pub async fn fetch_body_battery(
     let day = v.get("days").and_then(|d| d.as_array()).and_then(|d| d.last()).cloned();
     Ok(day.and_then(|d| serde_json::from_value(d).ok()))
 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatterySeriesPoint {
+    pub ts: f64,
+    pub stress: f64,
+    pub battery: f64,
+}
+
+pub async fn fetch_body_battery_series(
+    base: &str,
+    token: &str,
+    from_ms: f64,
+    to_ms: f64,
+    bucket: &str,
+) -> Result<Vec<BatterySeriesPoint>, String> {
+    let v = Request::get(&format!("{base}/api/v1/metrics/body-battery-series"))
+        .header("X-EphoriX-Token", token)
+        .query([
+            ("from", iso_from_ms(from_ms).as_str()),
+            ("to", iso_from_ms(to_ms).as_str()),
+            ("bucket", bucket),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("invalid json: {e}"))?;
+    serde_json::from_value(v["series"].clone()).map_err(|e| format!("series decode: {e}"))
+}

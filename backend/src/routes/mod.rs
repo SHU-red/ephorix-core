@@ -83,6 +83,10 @@ pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
             "/api/v1/metrics/body-battery",
             get(metrics::body_battery),
         )
+        .route(
+            "/api/v1/metrics/body-battery-series",
+            get(metrics::body_battery_series),
+        )
         .route("/api/v1/metrics/workouts", get(metrics::workouts))
         .route(
             "/api/v1/metrics/workouts/{id}/accept",

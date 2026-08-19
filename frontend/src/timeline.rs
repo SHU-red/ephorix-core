@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use wasm_bindgen::{closure::Closure, prelude::wasm_bindgen, JsCast};
 
-use crate::api::{fmt_time, ms_from_iso, AgogeSession, AgogeType, NutritionEvent, SleepDay, TimelinePoint};
+use crate::api::{fmt_time, ms_from_iso, AgogeSession, AgogeType, BatterySeriesPoint, NutritionEvent, SleepDay, TimelinePoint};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +66,10 @@ extern "C" {
     fn ephorix_reset_zoom(id: u32);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = setZoomMode)]
     fn ephorix_set_zoom_mode(id: u32, is_zoom: bool);
+    #[wasm_bindgen(js_namespace = EphoriX, js_name = linkX)]
+    fn ephorix_link_x(id_a: u32, id_b: u32);
+    #[wasm_bindgen(js_namespace = EphoriX, js_name = destroy)]
+    fn ephorix_destroy(id: u32);
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +96,7 @@ pub fn TimelineChart(
     types: ReadSignal<Vec<AgogeType>>,
     nutrition: ReadSignal<Vec<NutritionEvent>>,
     sleep: ReadSignal<Vec<SleepDay>>,
+    battery: ReadSignal<Vec<BatterySeriesPoint>>,
     series: ReadSignal<SeriesConfig>,
     selection: WriteSignal<Option<(f64, f64)>>,
     cursor: WriteSignal<Option<f64>>,
@@ -102,6 +107,20 @@ pub fn TimelineChart(
     let chart_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let overlay_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let chart_id = create_rw_signal(0u32);
+    let battery_ref: NodeRef<leptos::html::Div> = create_node_ref();
+    let battery_id = create_rw_signal(0u32);
+
+    // Destroy uPlot instances when this component unmounts (tab switch).
+    on_cleanup(move || {
+        let id = chart_id.get_untracked();
+        if id != 0 {
+            ephorix_destroy(id);
+        }
+        let bid = battery_id.get_untracked();
+        if bid != 0 {
+            ephorix_destroy(bid);
+        }
+    });
 
     // Clear the drag-selection rectangle on demand (bumped by the parent).
     create_effect(move |_| {
@@ -170,6 +189,29 @@ pub fn TimelineChart(
         let data = build_data(points.get());
         ephorix_set_data(id, &data.to_string());
     });
+    // Battery chart: stress + body battery, x-axis locked to the main chart.
+    create_effect(move |_| {
+        if let Some(el) = battery_ref.get() {
+            let width = el.client_width().max(320) as i32;
+            let opts = build_battery_opts(width);
+            let data = build_battery_data(battery.get_untracked());
+            let id = ephorix_create("ephorix-battery-chart", &opts.to_string(), &data.to_string());
+            battery_id.set(id);
+            let main = chart_id.get_untracked();
+            if main != 0 {
+                ephorix_link_x(main, id);
+            }
+        }
+    });
+
+    create_effect(move |_| {
+        let id = battery_id.get();
+        if id == 0 {
+            return;
+        }
+        let data = build_battery_data(battery.get());
+        ephorix_set_data(id, &data.to_string());
+    });
 
     // Apply series visibility toggles.
     create_effect(move |_| {
@@ -210,6 +252,9 @@ pub fn TimelineChart(
                     <p>"NO DATA"</p>
                 </div>
             </Show>
+        </div>
+        <div class="battery-wrap">
+            <div node_ref=battery_ref class="chart" id="ephorix-battery-chart"></div>
         </div>
     }
 }
@@ -257,6 +302,44 @@ fn build_data(points: Vec<TimelinePoint>) -> serde_json::Value {
     let steps: Vec<Option<f64>> = points.iter().map(|p| p.steps.map(|s| s as f64)).collect();
     let kcal: Vec<Option<f64>> = points.iter().map(|p| p.active_calories).collect();
     json!([xs, hr, steps, kcal])
+}
+
+fn build_battery_opts(width: i32) -> serde_json::Value {
+    json!({
+        "width": width,
+        "height": 150,
+        "legend": { "show": true, "live": true },
+        "cursor": { "show": true },
+        "select": { "show": false },
+        "scales": {
+            "x": { "time": true },
+            "y": { "range": [0, 100] },
+            "y2": { "range": [0, 300] }
+        },
+        "axes": [
+            { "side": 2, "size": 22, "stroke": "#3a3a3a", "grid": { "stroke": "#161616" },
+              "ticks": { "size": 80 }, "font": "10px 'IBM Plex Mono', monospace",
+              "values": "__ephorix_time__" },
+            { "side": 3, "size": 36, "stroke": "#8f8f8f", "grid": { "show": false },
+              "ticks": { "size": 70 }, "font": "10px 'IBM Plex Mono', monospace" },
+            { "side": 1, "size": 36, "scale": "y2", "stroke": "#e53935", "grid": { "show": false },
+              "ticks": { "size": 70 }, "font": "10px 'IBM Plex Mono', monospace" }
+        ],
+        "series": [
+            {},
+            { "label": "Stress", "stroke": "#8f8f8f", "width": 1.5, "points": { "show": false } },
+            { "label": "Body battery", "stroke": "#e53935", "width": 2.5, "scale": "y2",
+              "fill": "rgba(229, 57, 53, 0.12)", "points": { "show": false } }
+        ]
+    })
+}
+
+/// uPlot data rows: [x epoch-ms, stress, battery].
+fn build_battery_data(points: Vec<BatterySeriesPoint>) -> serde_json::Value {
+    let xs: Vec<f64> = points.iter().map(|p| p.ts).collect();
+    let stress: Vec<Option<f64>> = points.iter().map(|p| Some(p.stress)).collect();
+    let battery: Vec<Option<f64>> = points.iter().map(|p| Some(p.battery)).collect();
+    json!([xs, stress, battery])
 }
 
 fn render_overlay(

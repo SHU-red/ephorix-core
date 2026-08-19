@@ -231,6 +231,7 @@ pub fn App() -> impl IntoView {
     let (ai_model, set_ai_model) = create_signal(String::new());
     let (ai_key, set_ai_key) = create_signal(String::new());
     let (body_energy, set_body_energy) = create_signal(None::<BodyEnergyDay>);
+    let (battery_series, set_battery_series) = create_signal(Vec::<BatterySeriesPoint>::new());
     let (log, set_log) = create_signal(Vec::<LogEntry>::new());
     let log_counter = create_rw_signal(0u64);
     let log_event = move |kind: &'static str, msg: &str| {
@@ -303,6 +304,10 @@ pub fn App() -> impl IntoView {
             }
             match fetch_body_battery(&base, &token, from_ms, to_ms).await {
                 Ok(b) => set_body_energy.set(b),
+                Err(_) => {}
+            }
+            match fetch_body_battery_series(&base, &token, from_ms, to_ms, &bucket).await {
+                Ok(s) => set_battery_series.set(s),
                 Err(_) => {}
             }
             // Settings load once per session (do not clobber user changes).
@@ -672,6 +677,7 @@ pub fn App() -> impl IntoView {
                                 types=types
                                 nutrition=nutrition
                                 sleep=sleep
+                                battery=battery_series
                                 series=series
                                 selection=set_selection
                                 cursor=set_cursor

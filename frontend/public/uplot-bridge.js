@@ -220,6 +220,25 @@
     c.setScale("y2", { min: null, max: null });
     c.setScale("y3", { min: null, max: null });
   }
+
+  /* Lock the x-axis of two charts together (drag-zoom on one follows the
+     other). Guarded against feedback loops. */
+  function linkX(idA, idB) {
+    var a = charts.get(idA), b = charts.get(idB);
+    if (!a || !b) return;
+    var syncing = false;
+    function sync(from, to) {
+      if (syncing || !to) return;
+      syncing = true;
+      try {
+        to.setScale("x", { min: from.scales.x.min, max: from.scales.x.max });
+      } finally {
+        syncing = false;
+      }
+    }
+    a.hooks.setScale = [function (u, key) { if (key === "x") sync(u, b); }];
+    b.hooks.setScale = [function (u, key) { if (key === "x") sync(u, a); }];
+  }
   function onCursor(id, cb) {
     var c = charts.get(id);
     if (!c) return;
@@ -276,6 +295,7 @@
     onDrag: onDrag,
     zoomTo: zoomTo,
     setZoomMode: setZoomMode,
+    linkX: linkX,
     resetZoom: resetZoom,
     onCursor: onCursor,
     getSelection: getSelection,
