@@ -59,10 +59,10 @@ h1, h2 {
 
 .brand-row { display: flex; align-items: center; gap: 0; }
 
-/* Realistic helmet: height matches the EPHORIX text (44px); the wordmark
+/* Realistic helmet: height matches the EPHORIX text (64px); the wordmark
    slides over its right edge (z-index above). */
 .brand-mark {
-  height: 44px;
+  height: 64px;
   width: auto;
   display: block;
   position: relative;
@@ -71,10 +71,10 @@ h1, h2 {
 .brand-row h1 {
   position: relative;
   z-index: 1;
-  margin-left: -18px;
+  margin-left: -24px;
 }
 
-.brand h1 { font-size: 44px; line-height: 1; color: var(--red); text-shadow: 0 0 24px rgba(229, 57, 53, 0.35); }
+.brand h1 { font-size: 64px; line-height: 1; color: var(--red); text-shadow: 0 0 24px rgba(229, 57, 53, 0.35); }
 .brand .sub { color: var(--muted); letter-spacing: 0.34em; font-size: 11px; }
 
 .controls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
