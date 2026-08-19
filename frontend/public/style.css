@@ -100,18 +100,45 @@ h1, h2, h3 {
   filter: drop-shadow(0 0 16px rgba(229, 57, 53, 0.3));
 }
 .brand h1 {
+  display: inline-grid;
   font-size: 96px;
   line-height: 1;
   color: var(--red);
-  text-shadow: 0 0 22px rgba(229, 57, 53, 0.4), 0 2px 0 rgba(0, 0, 0, 0.6);
   position: relative;
   z-index: 1;
   letter-spacing: 0.06em;
-  text-transform: none; /* keep mixed-case Greek (Σ ρ η τ ι Χ) verbatim */
+  text-transform: none;
+  animation: wm-ember 3.6s ease-in-out infinite;
 }
-.brand h1 .wm-greek { display: none; }
-.brand h1:hover .wm-latin { display: none; }
-.brand h1:hover .wm-greek { display: inline; }
+
+@keyframes wm-ember {
+  0%, 100% { filter: drop-shadow(0 0 16px rgba(229, 57, 53, 0.28)); }
+  50%      { filter: drop-shadow(0 0 34px rgba(229, 57, 53, 0.60)); }
+}
+
+/* Both states share one grid cell; hover crossfades + slides + unblurs. */
+.wm-state {
+  grid-row: 1;
+  grid-column: 1;
+  white-space: nowrap;
+  transition: opacity 0.4s ease, transform 0.4s ease, filter 0.4s ease;
+}
+.wm-latin { filter: blur(0); }
+.wm-greek {
+  opacity: 0;
+  transform: translateY(0.45em) scale(0.96);
+  filter: blur(7px);
+}
+.brand h1:hover .wm-latin {
+  opacity: 0;
+  transform: translateY(-0.45em) scale(0.96);
+  filter: blur(7px);
+}
+.brand h1:hover .wm-greek {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  filter: blur(0);
+}
 .brand .sub {
   color: var(--muted);
   letter-spacing: 0.42em;
@@ -405,7 +432,7 @@ select { min-width: 120px; }
 .th-title:hover .en { display: inline; }
 
 /* Inline shield+lambda mark replacing the "O" in the wordmark. */
-.mark-o { display: inline-flex; height: 0.78em; width: 0.78em; vertical-align: -0.08em; }
+.mark-o { display: inline-block; height: 0.82em; width: 0.82em; vertical-align: -0.12em; margin: 0 0.02em; }
 .mark-o svg { width: 100%; height: 100%; }
 .th-greek { font-size: 20px; color: var(--muted); letter-spacing: 0.1em; }
 .th-meta { display: flex; gap: 12px; margin: 4px 0 10px; }
