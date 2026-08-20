@@ -6,6 +6,9 @@
 .env
 .env.local
 
+# Publish watchdog runtime state (scripts/publish.sh)
+.last-published-sha
+
 # Trunk / wasm build output
 frontend/dist/
 

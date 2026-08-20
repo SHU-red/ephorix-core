@@ -5,9 +5,12 @@
  *
  * Responsibilities:
  *  - chart lifecycle (create / setData / destroy)
- *  - drag-to-select range reporting (create session over selection)
- *  - cursor time reporting (close open session at cursor)
- *  - coordinate mapping for the session overlay bars (valToPos / plotBBox)
+ *  - linked x-axis groups: two charts share one x-domain, kept in lock-step
+ *    across create, setData, zoom and reset
+ *  - direction-aware drag zoom: horizontal drag -> full-height band (x-only),
+ *    vertical drag -> full-width band (y-only), diagonal -> box (both)
+ *  - zoom-level-aware time axis labels (hours / days / weeks / months / years)
+ *  - cursor time + coordinate mapping for the session overlay
  */
 (function (global) {
   "use strict";
@@ -16,29 +19,87 @@
   var nextId = 1;
 
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  var DAY_MS = 86400000;
 
   function pad(n) {
     return (n < 10 ? "0" : "") + n;
   }
 
-  /* Compact, span-aware x-axis labels (resolves the "__ephorix_time__"
-     sentinel that Rust injects into the opts JSON). */
-  function fmtTime(ms, spanSec) {
+  /* X-axis label, driven by the tick INCREMENT (not the dataset span), so the
+     unit scales with the zoom level:
+       < 1 day    -> "14:30"
+       < 7 days   -> "Mon 5"        (days)
+       < 28 days  -> "5 Aug"        (weeks)
+       < 366 days -> "Aug" / "Aug '26" (months; year shown on January)
+       >= 1 year  -> "2026"         (years)
+     Resolves the "__ephorix_time__" sentinel injected from Rust opts JSON. */
+  function fmtTick(ms, incrMs) {
     var d = new Date(ms);
-    if (spanSec <= 36 * 3600) {
+    if (incrMs < DAY_MS) {
       return pad(d.getHours()) + ":" + pad(d.getMinutes());
     }
-    if (spanSec <= 45 * 86400) {
-      return MONTHS[d.getMonth()] + " " + d.getDate();
+    if (incrMs < 7 * DAY_MS) {
+      return DAYS[d.getDay()] + " " + d.getDate();
     }
-    return MONTHS[d.getMonth()] + " '" + String(d.getFullYear()).slice(2);
+    if (incrMs < 28 * DAY_MS) {
+      return d.getDate() + " " + MONTHS[d.getMonth()];
+    }
+    if (incrMs < 366 * DAY_MS) {
+      var m = MONTHS[d.getMonth()];
+      return d.getMonth() === 0 ? m + " '" + String(d.getFullYear()).slice(2) : m;
+    }
+    return String(d.getFullYear());
   }
 
   function timeAxisValues(u, splits) {
-    var data = u.data;
-    var xs = data[0];
-    var spanSec = (xs[xs.length - 1] - xs[0]) / 1000;
-    return splits.map(function (t) { return fmtTime(t, spanSec); });
+    if (!splits || splits.length === 0) return [];
+    var xmin = u.scales.x.min;
+    var xmax = u.scales.x.max;
+    if (xmin == null || xmax == null) {
+      var xs = u.data && u.data[0];
+      if (!xs || !xs.length) return [];
+      xmin = xs[0];
+      xmax = xs[xs.length - 1];
+    }
+    var spanMs = xmax - xmin;
+    var incrMs = splits.length >= 2 ? splits[1] - splits[0] : spanMs;
+    return splits.map(function (t) { return fmtTick(t, incrMs); });
+  }
+
+  /* Per-chart hover tooltip: a div positioned inside the uPlot root that
+     follows the cursor and lists each series value colored by its stroke.
+     Appended to `setCursor` (never assigned) so it coexists with `onCursor`. */
+  function setupTooltip(c, meta) {
+    if (!meta || !meta.length) return;
+    var root = c.root;
+    if (getComputedStyle(root).position === "static") {
+      root.style.position = "relative";
+    }
+    var tip = document.createElement("div");
+    tip.className = "ephorix-tooltip";
+    tip.style.display = "none";
+    root.appendChild(tip);
+    if (!c.hooks.setCursor) c.hooks.setCursor = [];
+    c.hooks.setCursor.push(function (u) {
+      var idx = u.cursor.idx;
+      if (idx === null || idx === undefined || idx < 0) {
+        tip.style.display = "none";
+        return;
+      }
+      var d = new Date(u.data[0][idx]);
+      var html = '<span class="ephorix-tip-time">' + pad(d.getHours()) + ":" + pad(d.getMinutes()) + "</span>";
+      for (var i = 0; i < meta.length; i++) {
+        var m = meta[i];
+        var v = u.data[m.seriesIdx][idx];
+        if (v === null || v === undefined) continue;
+        html += '<span class="ephorix-tip-sep"> · </span><span style="color:' + m.color + '">' + m.label + " " + Math.round(v) + "</span>";
+      }
+      tip.innerHTML = html;
+      tip.style.display = "block";
+      tip.style.left = (u.bbox.left + u.cursor.left + 14) + "px";
+      tip.style.top = (u.bbox.top + u.cursor.top - 12) + "px";
+    });
   }
 
   function create(elId, optsJson, dataJson) {
@@ -48,15 +109,28 @@
     var opts = JSON.parse(optsJson);
     var data = JSON.parse(dataJson);
 
-    // Bars are requested declaratively from Rust; resolve to uPlot paths here.
-    (opts.series || []).forEach(function (s) {
+    // Bars and hover points are requested declaratively from Rust; resolve
+    // to uPlot paths / point functions here. Capture tooltip labels + colors
+    // before uPlot normalizes the series config.
+    var seriesMeta = [];
+    (opts.series || []).forEach(function (s, i) {
       if (s && s.bars) {
-        s.paths = uPlot.paths.bars({ size: [0, 60], align: 0 });
+        s.paths = uPlot.paths.bars({ size: [0, 30], align: 0 });
         delete s.bars;
+      }
+      if (s && s.points && s.points.show === "hover") {
+        s.points.show = function (u, seriesIdx) {
+          var idx = u.cursor.idx;
+          return idx === null || idx === undefined || idx < 0 ? null : [idx];
+        };
+        s.points.filter = function (u, seriesIdx, show) { return show; };
+      }
+      if (s && i > 0 && s.tooltip) {
+        seriesMeta.push({ seriesIdx: i, label: s.tooltip, color: s.stroke || "#fff" });
       }
     });
 
-    // Compact span-aware time labels (sentinel from Rust opts JSON).
+    // Zoom-aware time labels (sentinel from Rust opts JSON).
     if (opts.axes && opts.axes[0] && opts.axes[0].values === "__ephorix_time__") {
       opts.axes[0].values = timeAxisValues;
     }
@@ -64,12 +138,19 @@
     var chart = new uPlot(opts, data, el);
     var id = nextId++;
     charts.set(id, chart);
+    setupTooltip(chart, seriesMeta);
     return id;
   }
 
   function setData(id, dataJson) {
     var c = charts.get(id);
-    if (c) c.setData(JSON.parse(dataJson));
+    if (!c) return;
+    c.setData(JSON.parse(dataJson));
+    var group = groupOf(id);
+    if (group) {
+      recomputeFull(group);
+      if (group.full) setGroupX(group, group.full[0], group.full[1]);
+    }
   }
 
   /* Show/hide one series (1-based: 1=HR, 2=Steps, 3=kcal). */
@@ -84,38 +165,172 @@
       c.destroy();
       charts.delete(id);
     }
+    links.delete(id);
+    interactions.delete(id);
   }
 
+  /* ------------------------------------------------------------------------
+   * Linked x-axis groups.
+   *
+   * A group holds the ids of charts that must share an x-domain, plus the
+   * full (unzoomed) domain. Every mutation that affects x — create, setData,
+   * zoom, reset — writes the same explicit range to every member, so the two
+   * diagrams can never drift (uPlot's per-chart auto-range is the only thing
+   * that would otherwise let them diverge).
+   * ---------------------------------------------------------------------- */
+  var links = new Map();   // chart id -> group id
+  var groups = new Map();  // group id -> { ids: Set, full: [min,max] | null }
+  var nextGroupId = 1;
+
+  function groupOf(id) {
+    var gid = links.get(id);
+    return gid == null ? null : groups.get(gid);
+  }
+
+  function setGroupX(group, lo, hi) {
+    if (lo == null || hi == null) return;
+    if (hi - lo < 1) { lo -= 60000; hi += 60000; } // single-point guard
+    group.ids.forEach(function (id) {
+      var c = charts.get(id);
+      if (c) c.setScale("x", { min: lo, max: hi });
+    });
+  }
+
+  function recomputeFull(group) {
+    var min = Infinity;
+    var max = -Infinity;
+    group.ids.forEach(function (id) {
+      var c = charts.get(id);
+      var xs = c && c.data && c.data[0];
+      if (xs && xs.length) {
+        min = Math.min(min, xs[0]);
+        max = Math.max(max, xs[xs.length - 1]);
+      }
+    });
+    group.full = min === Infinity ? null : [min, max];
+    return group.full;
+  }
+
+  function linkX(idA, idB) {
+    var a = charts.get(idA);
+    var b = charts.get(idB);
+    if (!a || !b) return;
+
+    var gid = links.get(idA) != null ? links.get(idA)
+      : (links.get(idB) != null ? links.get(idB) : nextGroupId++);
+    var group = groups.get(gid) || { ids: new Set(), full: null };
+
+    // Merge the two groups if the charts were previously in different ones.
+    [idA, idB].forEach(function (id) {
+      var old = links.get(id);
+      if (old != null && old !== gid) {
+        var other = groups.get(old);
+        if (other) {
+          other.ids.forEach(function (oid) { group.ids.add(oid); links.set(oid, gid); });
+          groups.delete(old);
+        }
+      }
+      links.set(id, gid);
+      group.ids.add(id);
+    });
+
+    groups.set(gid, group);
+    var full = recomputeFull(group);
+    if (full) setGroupX(group, full[0], full[1]);
+  }
+
+  /* ------------------------------------------------------------------------
+   * Zoom.
+   * ---------------------------------------------------------------------- */
   var zoomModes = new Map();
 
   function setZoomMode(id, isZoom) {
     zoomModes.set(id, !!isZoom);
   }
 
-  /* Custom drag with direction-aware visual feedback. The rectangle snaps to
-     the full opposite axis for single-axis zooms — a full-height band for a
-     horizontal (x) zoom, a full-width band for a vertical (y) zoom, and the
-     raw rectangle for area zoom — so the user sees exactly what section they
-     are grabbing. Reports data coords + direction on release. */
-  function onDrag(id, cb) {
+  function zoomTo(id, x0, x1, y0, y1, dir) {
     var c = charts.get(id);
     if (!c) return;
+    if (dir !== "y") {
+      var group = groupOf(id);
+      if (group) {
+        setGroupX(group, Math.min(x0, x1), Math.max(x0, x1));
+      } else {
+        c.setScale("x", { min: Math.min(x0, x1), max: Math.max(x0, x1) });
+      }
+    }
+    if (dir !== "x") {
+      c.setScale("y", { min: Math.min(y0, y1), max: Math.max(y0, y1) });
+    }
+    c.setSelect({ left: 0, top: 0, width: 0, height: 0 }, true);
+  }
+
+  function resetZoom(id) {
+    var c = charts.get(id);
+    if (!c) return;
+    var group = groupOf(id);
+    if (group) {
+      recomputeFull(group);
+      if (group.full) {
+        setGroupX(group, group.full[0], group.full[1]);
+      } else {
+        group.ids.forEach(function (gid) {
+          var cc = charts.get(gid);
+          if (cc) cc.setScale("x", { min: null, max: null });
+        });
+      }
+    } else {
+      c.setScale("x", { min: null, max: null });
+    }
+    c.setScale("y", { min: null, max: null });
+    if (c.scales.y2) c.setScale("y2", { min: null, max: null });
+    if (c.scales.y3) c.setScale("y3", { min: null, max: null });
+  }
+
+  /* Direction-aware drag with snapping visual feedback:
+       horizontal -> full-height band (x-only zoom)
+       vertical   -> full-width band (y-only zoom)
+       diagonal   -> box (both axes)
+     In select mode (zoom off) the drag is always a full-height x band.
+     Pointer capture keeps the gesture alive when released outside the chart.
+
+     `onDrag` and `onClick` share one set of pointerdown/move/up listeners per
+     chart: a clean left-click (total movement < 5px) fires the click callback
+     with the epoch-ms timestamp under the cursor, while a drag fires the drag
+     callback — never both. */
+  var interactions = new Map(); // chart id -> shared pointer state
+
+  function ensureInteraction(id) {
+    var c = charts.get(id);
+    if (!c) return null;
+    if (interactions.has(id)) return interactions.get(id);
 
     var root = c.root;
-    var overlay = null;
-    var dragging = false;
-    var startX = 0, startY = 0;
+
+    // uPlot's root (.uplot) is not positioned; make it so the overlay's
+    // absolute coordinates are measured against the same origin as c.bbox.
+    if (getComputedStyle(root).position === "static") {
+      root.style.position = "relative";
+    }
+
+    var state = {
+      dragCb: null,
+      clickCb: null,
+      overlay: null,
+      dragging: false,
+      startX: 0,
+      startY: 0
+    };
+    interactions.set(id, state);
 
     function ensureOverlay() {
-      if (overlay) return;
-      overlay = document.createElement("div");
-      overlay.style.position = "absolute";
-      overlay.style.pointerEvents = "none";
-      overlay.style.border = "1px solid #ff5252";
-      overlay.style.background = "rgba(229, 57, 53, 0.16)";
-      overlay.style.zIndex = "20";
-      overlay.style.display = "none";
-      root.appendChild(overlay);
+      if (state.overlay) return;
+      state.overlay = document.createElement("div");
+      state.overlay.className = "ephorix-zoom-rect";
+      state.overlay.style.cssText =
+        "position:absolute;pointer-events:none;border:1px solid #ff5252;" +
+        "background:rgba(229,57,53,0.16);z-index:20;display:none;";
+      root.appendChild(state.overlay);
     }
 
     function dirOf(dx, dy) {
@@ -127,125 +342,119 @@
       return Math.max(lo, Math.min(v, hi));
     }
 
-    function draw(cx, cy) {
-      var dx = cx - startX, dy = cy - startY;
-      var dir = dirOf(dx, dy);
+    /* Root-coordinate rect with the snap applied, clamped to the plot area. */
+    function compute(cx, cy) {
       var b = c.bbox;
+      var dx = cx - state.startX;
+      var dy = cy - state.startY;
+      var dir = dirOf(dx, dy);
+      var zoom = zoomModes.get(id) !== false;
+      if (!zoom) dir = "x"; // select mode: always an x-range band
+
       var l, t, w, h;
       if (dir === "x") {
-        l = Math.min(startX, cx); w = Math.abs(dx); t = b.top; h = b.height;
+        l = Math.min(state.startX, cx); w = Math.abs(dx); t = b.top; h = b.height;
       } else if (dir === "y") {
-        l = b.left; w = b.width; t = Math.min(startY, cy); h = Math.abs(dy);
+        l = b.left; w = b.width; t = Math.min(state.startY, cy); h = Math.abs(dy);
       } else {
-        l = Math.min(startX, cx); w = Math.abs(dx); t = Math.min(startY, cy); h = Math.abs(dy);
+        l = Math.min(state.startX, cx); w = Math.abs(dx);
+        t = Math.min(state.startY, cy); h = Math.abs(dy);
       }
-      var snap = zoomModes.get(id) !== false;
-      if (!snap) {
-        l = Math.min(startX, cx); w = Math.abs(dx); t = Math.min(startY, cy); h = Math.abs(dy);
-      }
-      overlay.style.left = clamp(l, b.left, b.left + b.width) + "px";
-      overlay.style.top = clamp(t, b.top, b.top + b.height) + "px";
-      overlay.style.width = Math.max(2, w) + "px";
-      overlay.style.height = Math.max(2, h) + "px";
-      overlay.style.display = "block";
+
+      var L = clamp(l, b.left, b.left + b.width);
+      var T = clamp(t, b.top, b.top + b.height);
+      var W = clamp(w, 0, b.left + b.width - L);
+      var H = clamp(h, 0, b.top + b.height - T);
+      return { dir: dir, l: L, t: T, w: W, h: H };
+    }
+
+    function draw(cx, cy) {
+      var r = compute(cx, cy);
+      state.overlay.style.left = r.l + "px";
+      state.overlay.style.top = r.t + "px";
+      state.overlay.style.width = Math.max(2, r.w) + "px";
+      state.overlay.style.height = Math.max(2, r.h) + "px";
+      state.overlay.style.display = "block";
     }
 
     root.addEventListener("pointerdown", function (e) {
       if (e.button !== 0) return;
       ensureOverlay();
       var r = root.getBoundingClientRect();
-      startX = e.clientX - r.left;
-      startY = e.clientY - r.top;
-      dragging = true;
+      state.startX = e.clientX - r.left;
+      state.startY = e.clientY - r.top;
+      state.dragging = true;
+      if (root.setPointerCapture) {
+        try { root.setPointerCapture(e.pointerId); } catch (err) { /* no-op */ }
+      }
       e.preventDefault();
     });
 
     root.addEventListener("pointermove", function (e) {
-      if (!dragging) return;
+      if (!state.dragging) return;
       var r = root.getBoundingClientRect();
-      var cx = e.clientX - r.left, cy = e.clientY - r.top;
-      if (Math.abs(cx - startX) < 3 && Math.abs(cy - startY) < 3) return;
+      var cx = e.clientX - r.left;
+      var cy = e.clientY - r.top;
+      if (Math.abs(cx - state.startX) < 3 && Math.abs(cy - state.startY) < 3) return;
       draw(cx, cy);
     });
 
-    root.addEventListener("pointerup", function (e) {
-      if (!dragging) return;
-      dragging = false;
-      if (overlay) overlay.style.display = "none";
+    function finish(e) {
+      if (!state.dragging) return;
+      state.dragging = false;
       var r = root.getBoundingClientRect();
-      var cx = e.clientX - r.left, cy = e.clientY - r.top;
-      var dx = cx - startX, dy = cy - startY;
-      if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return; // click, not drag
+      var cx = e.clientX - r.left;
+      var cy = e.clientY - r.top;
+      if (state.overlay) state.overlay.style.display = "none";
 
-      var dir = dirOf(dx, dy);
+      // Clean click: route to onClick (if any) and never the drag callback.
+      if (Math.abs(cx - state.startX) < 5 && Math.abs(cy - state.startY) < 5) {
+        if (state.clickCb) {
+          state.clickCb(c.posToVal(cx - c.bbox.left, "x"));
+        }
+        return;
+      }
+
+      var rec = compute(cx, cy);
       var b = c.bbox;
-      var xlo = clamp(Math.min(startX, cx), b.left, b.left + b.width);
-      var xhi = clamp(Math.max(startX, cx), b.left, b.left + b.width);
-      var ylo = clamp(Math.min(startY, cy), b.top, b.top + b.height);
-      var yhi = clamp(Math.max(startY, cy), b.top, b.top + b.height);
-
-      var snap = zoomModes.get(id) !== false;
-      if (snap) {
-        if (dir === "x") { ylo = b.top; yhi = b.top + b.height; }
-        else if (dir === "y") { xlo = b.left; xhi = b.left + b.width; }
+      if (state.dragCb) {
+        state.dragCb(JSON.stringify({
+          x0: c.posToVal(rec.l - b.left, "x"),
+          x1: c.posToVal(rec.l - b.left + rec.w, "x"),
+          y0: c.posToVal(rec.t - b.top, "y"),
+          y1: c.posToVal(rec.t - b.top + rec.h, "y"),
+          dir: rec.dir
+        }));
       }
+    }
 
-      cb(JSON.stringify({
-        x0: c.posToVal(xlo - b.left, "x"),
-        x1: c.posToVal(xhi - b.left, "x"),
-        y0: c.posToVal(ylo - b.top, "y"),
-        y1: c.posToVal(yhi - b.top, "y"),
-        dir: snap ? dir : "x"
-      }));
+    root.addEventListener("pointerup", finish);
+    root.addEventListener("pointercancel", function () {
+      state.dragging = false;
+      if (state.overlay) state.overlay.style.display = "none";
     });
+
+    return state;
   }
 
-  function zoomTo(id, x0, x1, y0, y1, dir) {
-    var c = charts.get(id);
-    if (!c) return;
-    if (dir !== "y") {
-      c.setScale("x", { min: Math.min(x0, x1), max: Math.max(x0, x1) });
-    }
-    if (dir !== "x") {
-      c.setScale("y", { min: Math.min(y0, y1), max: Math.max(y0, y1) });
-    }
-    c.setSelect({ left: 0, top: 0, width: 0, height: 0 }, true);
+  function onDrag(id, cb) {
+    var s = ensureInteraction(id);
+    if (s) s.dragCb = cb;
   }
 
-  function resetZoom(id) {
-    var c = charts.get(id);
-    if (!c) return;
-    c.setScale("x", { min: null, max: null });
-    c.setScale("y", { min: null, max: null });
-    c.setScale("y2", { min: null, max: null });
-    c.setScale("y3", { min: null, max: null });
+  function onClick(id, cb) {
+    var s = ensureInteraction(id);
+    if (s) s.clickCb = cb;
   }
 
-  /* Lock the x-axis of two charts together (drag-zoom on one follows the
-     other). Guarded against feedback loops. */
-  function linkX(idA, idB) {
-    var a = charts.get(idA), b = charts.get(idB);
-    if (!a || !b) return;
-    var syncing = false;
-    function sync(from, to) {
-      if (syncing || !to) return;
-      syncing = true;
-      try {
-        to.setScale("x", { min: from.scales.x.min, max: from.scales.x.max });
-      } finally {
-        syncing = false;
-      }
-    }
-    a.hooks.setScale = [function (u, key) { if (key === "x") sync(u, b); }];
-    b.hooks.setScale = [function (u, key) { if (key === "x") sync(u, a); }];
-  }
   function onCursor(id, cb) {
     var c = charts.get(id);
     if (!c) return;
-    c.hooks.setCursor = [function (u) {
+    if (!c.hooks.setCursor) c.hooks.setCursor = [];
+    c.hooks.setCursor.push(function (u) {
       var idx = u.cursor.idx;
       cb(idx === null || idx === undefined ? null : u.data[0][idx]);
-    }];
+    });
   }
 
   function getSelection(id) {
@@ -293,6 +502,7 @@
     setSeriesShow: setSeriesShow,
     destroy: destroy,
     onDrag: onDrag,
+    onClick: onClick,
     zoomTo: zoomTo,
     setZoomMode: setZoomMode,
     linkX: linkX,

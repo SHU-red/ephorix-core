@@ -15,6 +15,8 @@ pub struct AgogeType {
     pub color_code: String,
     pub icon: String,
     pub category: String,
+    #[serde(default)]
+    pub config: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]

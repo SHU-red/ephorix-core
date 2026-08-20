@@ -93,11 +93,13 @@ h1, h2, h3 {
 
 .brand-row { display: flex; align-items: center; }
 
-/* Helmet: same height as the EPHORIX text (96px), on the right of the top area. */
+/* Spartan banner (opaque full-bleed): top-right of the header, same height as
+   the EPHORIX wordmark. No drop-shadow — the image is fully opaque (its black
+   background matches --bg), so a shadow would trace a rectangular halo. */
 .brand-helmet {
   height: 96px;
   width: auto;
-  filter: drop-shadow(0 0 16px rgba(229, 57, 53, 0.3));
+  align-self: flex-start;
 }
 .brand h1 {
   display: inline-grid;
@@ -242,12 +244,30 @@ select { min-width: 120px; }
 
 /* ---------------- Timeline ---------------- */
 
-.chart-wrap { position: relative; }
 .chart { width: 100%; }
 .session-overlay { position: absolute; pointer-events: none; }
-.session-bar { position: absolute; top: 0; bottom: 0; opacity: 0.5; border: 1px solid #000; }
-.chart-wrap { position: relative; }
-.battery-wrap { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.session-bar { position: absolute; top: 0; bottom: 0; opacity: 0.5; border: 1px solid #000; overflow: hidden; pointer-events: auto; cursor: pointer; }
+.session-bar:hover { opacity: 0.9; filter: brightness(1.35); z-index: 5; }
+.session-bar-name { position: absolute; top: 2px; left: 4px; right: 4px; font-size: 10px; line-height: 1.1; letter-spacing: 0.06em; color: #fff; text-shadow: 0 0 2px rgba(0, 0, 0, 0.9); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; user-select: none; font-family: "IBM Plex Mono", ui-monospace, monospace; }
+
+/* ---------------- Session strip + inline editor (markers) ---------------- */
+
+.session-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.session-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font-size: 11px; letter-spacing: 0.06em; cursor: pointer; }
+.session-chip:hover { border-color: var(--red); color: var(--red); }
+.chip-name { font-weight: 600; letter-spacing: 0.06em; }
+.chip-time { color: var(--muted); font-size: 10px; font-family: "IBM Plex Mono", ui-monospace, monospace; }
+
+.session-editor { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--line); }
+.chart-row { display: flex; align-items: stretch; gap: 12px; }
+.chart-row + .chart-row { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.chart-wrap { position: relative; flex: 1; min-width: 0; }
+.battery-wrap { flex: 1; min-width: 0; }
+.legend-sidebar { flex: 0 0 160px; border: 1px solid var(--line); background: var(--panel); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.legend-item { display: flex; align-items: center; gap: 8px; font-size: 11px; letter-spacing: 0.08em; }
+.legend-swatch { display: inline-block; width: 10px; height: 10px; flex: 0 0 auto; }
+.legend-name { font-weight: 600; letter-spacing: 0.06em; }
+.legend-unit { margin-left: auto; color: var(--dim); font-size: 10px; font-family: "IBM Plex Mono", ui-monospace, monospace; }
 
 .sleep-band { background: rgba(143, 143, 143, 0.16); border-top: 1px solid #4a4a4a; }
 .nutrition-dot { border: 1px solid #000; transform: translateX(-50%); }
@@ -257,16 +277,51 @@ select { min-width: 120px; }
 .u-legend {
   background: #0a0a0a !important;
   border: 1px solid var(--line);
+  border-radius: 4px;
   color: var(--text);
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 11px;
+  padding: 4px 8px;
 }
-.u-legend .u-marker { border-color: transparent !important; }
+/* uPlot inlines `border: 2px solid <stroke>` + a semi-transparent `background`
+   on each legend swatch. Render a SOLID block of the series stroke color by
+   letting the border fill the whole box (border-box sizing: a 5px border on a
+   10px box leaves no content area). This also makes the kcal swatch visible —
+   it has no fill, so it would otherwise collapse to nothing. */
+.u-legend .u-marker {
+  width: 10px;
+  height: 10px;
+  border-width: 5px !important;
+  background: transparent !important;
+}
+.u-legend .u-series:first-child { display: none; }
+.u-legend .u-label { font-weight: 600; }
+.u-legend .u-value {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
 .u-legend .u-off { color: #4a4a4a !important; }
+
+.ephorix-tooltip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 30;
+  background: #0a0a0a;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+}
+.ephorix-tooltip .ephorix-tip-time { color: var(--dim); }
+.ephorix-tooltip .ephorix-tip-sep { color: var(--dim); margin: 0 4px; }
 
 .stats-line { color: var(--dim); font-size: 11px; letter-spacing: 0.08em; margin: -6px 0 12px; }
 
-.series-toggles { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
 .pill {
   display: inline-flex; align-items: center; gap: 7px;
   background: #030303; color: var(--text);
@@ -275,12 +330,7 @@ select { min-width: 120px; }
   letter-spacing: 0.14em; cursor: pointer; text-transform: uppercase;
   transition: opacity 0.12s ease, border-color 0.12s ease;
 }
-.pill .dot { width: 8px; height: 8px; flex: 0 0 auto; }
 .pill.on { border-color: var(--red); color: var(--red); }
-.pill.off { opacity: 0.28; }
-.dot-hr { background: #e53935; }
-.dot-steps { background: #8f8f8f; }
-.dot-kcal { background: #ff5252; }
 
 .range-buttons { display: flex; gap: 6px; align-items: center; }
 .range-buttons .pill { padding: 4px 10px; font-family: "Anton", "Arial Narrow", sans-serif; letter-spacing: 0.08em; }
@@ -431,9 +481,6 @@ select { min-width: 120px; }
 .th-title:hover .gr { display: none; }
 .th-title:hover .en { display: inline; }
 
-/* Inline shield+lambda mark replacing the "O" in the wordmark. */
-.mark-o { display: inline-block; height: 0.82em; width: 0.82em; vertical-align: -0.12em; margin: 0 0.02em; }
-.mark-o svg { width: 100%; height: 100%; }
 .th-greek { font-size: 20px; color: var(--muted); letter-spacing: 0.1em; }
 .th-meta { display: flex; gap: 12px; margin: 4px 0 10px; }
 .th-pos { color: var(--red-bright); font-style: italic; font-size: 12px; }

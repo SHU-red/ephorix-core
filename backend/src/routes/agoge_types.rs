@@ -30,6 +30,8 @@ pub struct UpsertType {
     pub icon: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
 }
 
 const CATEGORIES: [&str; 6] = [
@@ -44,6 +46,12 @@ fn normalize_category(c: Option<String>) -> String {
         "mixed".to_string()
     }
 }
+fn normalize_config(c: Option<serde_json::Value>) -> serde_json::Value {
+    match c {
+        Some(serde_json::Value::Object(o)) => serde_json::Value::Object(o),
+        _ => serde_json::Value::Object(Default::default()),
+    }
+}
 
 pub async fn create(
     State(pool): State<PgPool>,
@@ -54,15 +62,17 @@ pub async fn create(
         return Err(ApiError::BadRequest("name must not be empty".to_string()));
     }
     let category = normalize_category(body.category);
+    let config = normalize_config(body.config);
     let ty = sqlx::query_as::<_, AgogeType>(
-        "INSERT INTO agoge_types (name, color_code, icon, category)
-         VALUES ($1, $2, $3, $4)
+        "INSERT INTO agoge_types (name, color_code, icon, category, config)
+         VALUES ($1, $2, $3, $4, $5)
          RETURNING *",
     )
     .bind(name)
     .bind(body.color_code.unwrap_or_else(|| "#E53935".to_string()))
     .bind(body.icon.unwrap_or_else(|| "dumbbell".to_string()))
     .bind(&category)
+    .bind(&config)
     .fetch_one(&pool)
     .await?;
     Ok((axum::http::StatusCode::CREATED, Json(ty)))
@@ -74,12 +84,14 @@ pub async fn update(
     Json(body): Json<UpsertType>,
 ) -> ApiResult<Json<AgogeType>> {
     let category = normalize_category(body.category);
+    let config = normalize_config(body.config);
     let ty = sqlx::query_as::<_, AgogeType>(
         "UPDATE agoge_types
          SET name = $2,
              color_code = COALESCE($3, color_code),
              icon = COALESCE($4, icon),
-             category = $5
+             category = $5,
+             config = $6
          WHERE id = $1
          RETURNING *",
     )
@@ -88,6 +100,7 @@ pub async fn update(
     .bind(body.color_code)
     .bind(body.icon)
     .bind(&category)
+    .bind(&config)
     .fetch_optional(&pool)
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("agoge type {id} not found")))?;

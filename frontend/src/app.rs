@@ -4,10 +4,10 @@
 
 use leptos::*;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::api::*;
-use crate::icons::{glyph_svg, GLYPH_KEYS, LAMBDA, MARK};
+use crate::icons::{glyph_svg, GLYPH_KEYS, LAMBDA};
 use crate::timeline::{SeriesConfig, TimelineChart};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +222,8 @@ pub fn App() -> impl IntoView {
     let clear_sel = create_rw_signal(0u32);
     let reset_zoom = create_rw_signal(0u32);
     let (selected_id, set_selected_id) = create_signal(None::<String>);
+    let selected_session = create_rw_signal(None::<AgogeSession>);
+    let chart_id = create_rw_signal(0u32);
     let (nutrition, set_nutrition) = create_signal(Vec::<NutritionEvent>::new());
     let (sleep, set_sleep) = create_signal(Vec::<SleepDay>::new());
     let (detections, set_detections) = create_signal(Vec::<Detection>::new());
@@ -413,17 +415,6 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    let toggle_series = move |key: &'static str| {
-        let mut s = series.get();
-        match key {
-            "heartRate" => s.heart_rate = !s.heart_rate,
-            "steps" => s.steps = !s.steps,
-            "calories" => s.calories = !s.calories,
-            _ => {}
-        }
-        set_series.set(s);
-        persist_settings();
-    };
     let set_range_days = move |d: i64| {
         set_days.set(d);
         persist_settings();
@@ -440,9 +431,100 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // -- Timeline marker interactions ---------------------------------------
+
+    // Chart is ready: remember its bridge id so the session strip can zoom.
+    let handle_chart_ready = move |id: u32| {
+        chart_id.set(id);
+    };
+
+    // Clean left-click on empty plot area -> create an open session at that ts.
+    let handle_chart_click = move |ts: f64| {
+        let Some(type_id) = selected_type.get() else {
+            set_error.set(Some("select a type first".to_string()));
+            return;
+        };
+        let base = base.get();
+        let token = token.get();
+        let body = json!({
+            "typeId": type_id,
+            "startTime": iso_from_ms(ts),
+            "endTime": null,
+        });
+        spawn_local(async move {
+            match post_json(&base, &token, "/api/v1/agoge-sessions", &body).await {
+                Ok(_) => refresh(),
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    };
+
+    // Click on a session bar -> select it for inline editing.
+    let handle_session_click = move |sid: String| {
+        let found = sessions.get().into_iter().find(|s| s.id == sid);
+        selected_session.set(found);
+    };
+
+    // Session strip chip -> zoom the chart to that session.
+    let zoom_to_session = move |s: AgogeSession| {
+        let id = chart_id.get();
+        if id == 0 {
+            return;
+        }
+        let Some(start) = ms_from_iso(&s.start_time) else { return };
+        let end = s.end_time.as_deref().and_then(ms_from_iso).unwrap_or_else(js_sys::Date::now);
+        crate::timeline::ephorix_zoom_to(id, start, end, 0.0, 0.0, "x");
+    };
+
+    let save_selected_session = move |(id, type_id, start, end): (String, String, String, String)| {
+        let Some(start_ms) = datetime_local_to_ms(&start) else {
+            set_error.set(Some("invalid start time".to_string()));
+            return;
+        };
+        let end_ms = datetime_local_to_ms(&end);
+        let tid: Option<String> = if type_id.is_empty() { None } else { Some(type_id) };
+        let body = json!({
+            "typeId": tid,
+            "startTime": iso_from_ms(start_ms),
+            "endTime": end_ms.map(iso_from_ms),
+        });
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            match patch_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}"), &body).await {
+                Ok(_) => {
+                    selected_session.set(None);
+                    refresh();
+                }
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    };
+
+    let close_selected_session = move |id: String| {
+        let base = base.get();
+        let token = token.get();
+        let end = iso_from_ms(js_sys::Date::now());
+        spawn_local(async move {
+            match patch_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}"), &json!({ "endTime": end })).await {
+                Ok(_) => {
+                    selected_session.set(None);
+                    refresh();
+                }
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    };
+
+    let delete_selected_session = move |id: String| {
+        selected_session.set(None);
+        delete_session(id);
+    };
+
+
     // -- Agoge types CRUD ----------------------------------------------------
 
-    let create_type = move |name: String, color: String, icon: String, category: String| {
+    let create_type = move |name: String, color: String, icon: String, category: String, config: Value| {
         let name = name.trim().to_string();
         if name.is_empty() {
             return;
@@ -450,7 +532,7 @@ pub fn App() -> impl IntoView {
         let base = base.get();
         let token = token.get();
         spawn_local(async move {
-            let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category });
+            let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category, "config": config });
             match post_json(&base, &token, "/api/v1/agoge-types", &body).await {
                 Ok(_) => { log_event("agoge", "created agoge"); refresh(); }
                 Err(e) => set_error.set(Some(e)),
@@ -458,11 +540,11 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    let update_type = move |id: String, name: String, color: String, icon: String, category: String| {
+    let update_type = move |id: String, name: String, color: String, icon: String, category: String, config: Value| {
         let base = base.get();
         let token = token.get();
         spawn_local(async move {
-            let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category });
+            let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category, "config": config });
             match put_json(&base, &token, &format!("/api/v1/agoge-types/{id}"), &body).await {
                 Ok(_) => {
                     log_event("agoge", "updated agoge");
@@ -570,8 +652,8 @@ pub fn App() -> impl IntoView {
                 <div class="brand">
                     <div class="brand-row">
                         <h1>
-                            <span class="wm-latin"><span>"Eph"</span><span class="mark-o" inner_html=MARK></span><span>"riX"</span></span>
-                            <span class="wm-greek"><span>"Σρη"</span><span class="mark-o" inner_html=MARK></span><span>"τιΧ"</span></span>
+                            <span class="wm-state wm-latin">"EPHORIX"</span>
+                            <span class="wm-state wm-greek">"ΕΦΟΡΙΞ"</span>
                         </h1>
                     </div>
                     <span class="sub">"ΑΓΩΓΗ · TRAINING COMMAND"</span>
@@ -652,23 +734,11 @@ pub fn App() -> impl IntoView {
                                             <button class="pill" class:on=move || days.get() == d on:click=move |_| set_range_days(d)>{*label}</button>
                                         }
                                     }).collect_view()}
+                                    <span class="muted cursor-readout">
+                                        "CURSOR "
+                                        {move || cursor.get().map(fmt_time).unwrap_or_else(|| "—".to_string())}
+                                    </span>
                                 </div>
-                            </div>
-                            <div class="series-toggles">
-                                <span class="muted">"METRICS"</span>
-                                <button class="pill" class:on=move || series.get().heart_rate class:off=move || !series.get().heart_rate on:click=move |_| toggle_series("heartRate")>
-                                    <span class="dot dot-hr"></span>"HR"
-                                </button>
-                                <button class="pill" class:on=move || series.get().steps class:off=move || !series.get().steps on:click=move |_| toggle_series("steps")>
-                                    <span class="dot dot-steps"></span>"STEPS"
-                                </button>
-                                <button class="pill" class:on=move || series.get().calories class:off=move || !series.get().calories on:click=move |_| toggle_series("calories")>
-                                    <span class="dot dot-kcal"></span>"KCAL"
-                                </button>
-                                <span class="muted cursor-readout">
-                                    "CURSOR "
-                                    {move || cursor.get().map(fmt_time).unwrap_or_else(|| "—".to_string())}
-                                </span>
                             </div>
                             <TimelineChart
                                 points=points
@@ -683,7 +753,25 @@ pub fn App() -> impl IntoView {
                                 zoom_mode=zoom_mode
                                 clear_trigger=clear_sel
                                 reset_zoom=reset_zoom
+                                on_click_at=Callback::new(move |ts| handle_chart_click(ts))
+                                on_ready=Callback::new(move |id| handle_chart_ready(id))
+                                on_session_click=Callback::new(move |sid| handle_session_click(sid))
                             />
+                            <div class="session-strip">
+                                <For each=move || {
+                                    let _ = types.get();
+                                    let mut ss = sessions.get();
+                                    ss.sort_by(|a, b| {
+                                        ms_from_iso(&b.start_time)
+                                            .unwrap_or(0.0)
+                                            .partial_cmp(&ms_from_iso(&a.start_time).unwrap_or(0.0))
+                                            .unwrap_or(std::cmp::Ordering::Equal)
+                                    });
+                                    ss
+                                } key=|s| s.id.clone() let:s>
+                                    <SessionChip session=s types=types on_zoom=Callback::new(move |s| zoom_to_session(s)) />
+                                </For>
+                            </div>
                             <div class="timeline-actions">
                                 <button class="btn" class:on=move || !zoom_mode.get() on:click=toggle_zoom_mode>
                                     {move || if zoom_mode.get() { "DRAG = ZOOM" } else { "DRAG = SELECT" }}
@@ -705,6 +793,22 @@ pub fn App() -> impl IntoView {
                                     "SELECTION: "
                                     {move || selection.get().map(|(f, t)| format!("{} → {}", fmt_time(f.min(t)), fmt_time(f.max(t)))).unwrap_or_else(|| "—".to_string())}
                                 </span>
+                            <Show when=move || selected_session.get().is_some() fallback=|| ()>
+                                {move || {
+                                    let s = selected_session.get().unwrap();
+                                    view! {
+                                        <div key=s.id.clone()>
+                                            <SessionEditor
+                                                session=s
+                                                types=types
+                                                on_save=Callback::new(move |t| save_selected_session(t))
+                                                on_delete=Callback::new(move |id| delete_selected_session(id))
+                                                on_close=Callback::new(move |id| close_selected_session(id))
+                                            />
+                                        </div>
+                                    }
+                                }}
+                            </Show>
                             </div>
                         </section>
                     }.into_view(),
@@ -744,11 +848,11 @@ pub fn App() -> impl IntoView {
                                         <div key=sel.clone()>
                                             <AgogeConfigForm
                                                 ty=ty
-                                                on_save=Callback::new(move |(n, c, i, cat): (String, String, String, String)| {
+                                                on_save=Callback::new(move |(n, c, i, cat, cfg): (String, String, String, String, Value)| {
                                                     if let Some(id) = sel.clone() {
-                                                        update_type(id, n, c, i, cat);
+                                                        update_type(id, n, c, i, cat, cfg);
                                                     } else {
-                                                        create_type(n, c, i, cat);
+                                                        create_type(n, c, i, cat, cfg);
                                                     }
                                                     set_selected_id.set(None);
                                                 })
@@ -1047,7 +1151,7 @@ fn SessionRow(
 #[component]
 fn AgogeConfigForm(
     ty: Option<AgogeType>,
-    on_save: Callback<(String, String, String, String)>,
+    on_save: Callback<(String, String, String, String, Value)>,
     on_delete: Callback<String>,
 ) -> impl IntoView {
     let is_new = ty.is_none();
@@ -1055,7 +1159,16 @@ fn AgogeConfigForm(
     let (name, set_name) = create_signal(ty.as_ref().map(|t| t.name.clone()).unwrap_or_default());
     let (color, set_color) = create_signal(ty.as_ref().map(|t| t.color_code.clone()).unwrap_or_else(|| "#E53935".to_string()));
     let (icon, set_icon) = create_signal(ty.as_ref().map(|t| t.icon.clone()).unwrap_or_else(|| GLYPH_KEYS[0].to_string()));
-    let (category, set_category) = create_signal(ty.as_ref().map(|t| t.category.clone()).unwrap_or_else(|| "mixed".to_string()));
+    let initial_category = ty.as_ref().map(|t| t.category.clone()).unwrap_or_else(|| "mixed".to_string());
+    let (category, set_category) = create_signal(initial_category.clone());
+    // Config object: pre-filled from the loaded type, otherwise defaults for
+    // the (initial) category. An empty/null config falls back to defaults too.
+    let config = create_rw_signal(
+        ty.as_ref()
+            .map(|t| t.config.clone())
+            .filter(|c| c.as_object().map(|o| !o.is_empty()).unwrap_or(false))
+            .unwrap_or_else(|| default_config(&initial_category)),
+    );
     view! {
         <div class="config-form">
             <label class="ctl">"NAME"
@@ -1075,12 +1188,63 @@ fn AgogeConfigForm(
                     let val = *val;
                     let label = *label;
                     view! {
-                        <button class="cat-btn" class:on=move || category.get() == val on:click=move |_| set_category.set(val.to_string())>{label}</button>
+                        <button class="cat-btn" class:on=move || category.get() == val on:click=move |_| {
+                            set_category.set(val.to_string());
+                            config.set(default_config(val));
+                        }>{label}</button>
                     }
                 }).collect_view()}
             </div>
+            {move || match category.get().as_str() {
+                "distance" => view! {
+                    <div class="subsettings">
+                        {num_field(config, "targetDistanceM", "DISTANCE (M)", false, Some(0), None)}
+                        {num_field(config, "paceSecPerKm", "PACE (SEC/KM)", true, Some(0), None)}
+                    </div>
+                }.into_view(),
+                "repetitive" => view! {
+                    <div class="subsettings">
+                        {num_field(config, "targetReps", "REPS", false, Some(0), None)}
+                        {num_field(config, "targetSets", "SETS", false, Some(0), None)}
+                        {num_field(config, "restSeconds", "REST (SEC)", false, Some(0), None)}
+                    </div>
+                }.into_view(),
+                "dynamic" => view! {
+                    <div class="subsettings">
+                        {num_field(config, "targetDurationSec", "DURATION (SEC)", false, Some(0), None)}
+                        <label class="ctl">"INTENSITY"
+                            <select prop:value=move || config.get().get("intensity").and_then(|v| v.as_str()).unwrap_or("moderate").to_string() on:change=move |ev| {
+                                let v = event_target_value(&ev);
+                                config.update(|c| { c["intensity"] = json!(v); });
+                            }>
+                                <option value="low">"LOW"</option>
+                                <option value="moderate">"MODERATE"</option>
+                                <option value="high">"HIGH"</option>
+                            </select>
+                        </label>
+                    </div>
+                }.into_view(),
+                "circuit" => view! {
+                    <div class="subsettings">
+                        {num_field(config, "rounds", "ROUNDS", false, Some(0), None)}
+                        {num_field(config, "workSeconds", "WORK (SEC)", false, Some(0), None)}
+                        {num_field(config, "restSeconds", "REST (SEC)", false, Some(0), None)}
+                    </div>
+                }.into_view(),
+                "recovery" => view! {
+                    <div class="subsettings">
+                        {num_field(config, "targetDurationSec", "DURATION (SEC)", false, Some(0), None)}
+                        {num_field(config, "maxHrPercent", "MAX HR %", false, Some(0), Some(100))}
+                    </div>
+                }.into_view(),
+                _ => view! {
+                    <div class="subsettings">
+                        {num_field(config, "targetDurationSec", "DURATION (SEC)", false, Some(0), None)}
+                    </div>
+                }.into_view(),
+            }}
             <div class="config-actions">
-                <button class="btn" on:click=move |_| on_save.call((name.get(), color.get(), icon.get(), category.get()))>
+                <button class="btn" on:click=move |_| on_save.call((name.get(), color.get(), icon.get(), category.get(), config.get()))>
                     {if is_new { "CREATE" } else { "SAVE" }}
                 </button>
                 {existing_id.clone().map(|id| {
@@ -1090,6 +1254,58 @@ fn AgogeConfigForm(
                 })}
             </div>
         </div>
+    }
+}
+
+/// Sensible per-category defaults for the free-form `config` object.
+fn default_config(category: &str) -> Value {
+    match category {
+        "distance" => json!({ "targetDistanceM": 0, "paceSecPerKm": null }),
+        "repetitive" => json!({ "targetReps": 0, "targetSets": 0, "restSeconds": 0 }),
+        "dynamic" => json!({ "targetDurationSec": 0, "intensity": "moderate" }),
+        "circuit" => json!({ "rounds": 0, "workSeconds": 0, "restSeconds": 0 }),
+        "recovery" => json!({ "targetDurationSec": 0, "maxHrPercent": 0 }),
+        _ => json!({ "targetDurationSec": 0 }),
+    }
+}
+
+/// Labeled integer input bound to a single `config` object key. Empty input
+/// resolves to `0` (or `null` for optional fields) on the object.
+fn num_field(
+    config: RwSignal<Value>,
+    key: &'static str,
+    label: &'static str,
+    optional: bool,
+    min: Option<i64>,
+    max: Option<i64>,
+) -> impl IntoView {
+    let value = move || {
+        config
+            .get()
+            .get(key)
+            .and_then(|v| v.as_i64())
+            .map(|n| n.to_string())
+            .unwrap_or_default()
+    };
+    let on_input = move |ev: web_sys::Event| {
+        let trimmed = event_target_value(&ev);
+        let trimmed = trimmed.trim();
+        let parsed = if trimmed.is_empty() {
+            if optional { Value::Null } else { json!(0) }
+        } else {
+            json!(trimmed.parse::<i64>().unwrap_or(0))
+        };
+        config.update(|c| {
+            c[key] = parsed;
+        });
+    };
+    let min_attr = min.map(|v| v.to_string());
+    let max_attr = max.map(|v| v.to_string());
+    view! {
+        <label class="ctl">
+            {label}
+            <input type="number" prop:value=value on:input=on_input min=min_attr max=max_attr />
+        </label>
     }
 }
 
@@ -1117,6 +1333,126 @@ fn GlyphPicker(value: ReadSignal<String>, set: WriteSignal<String>) -> impl Into
                     <span inner_html=glyph_svg(k)></span>
                 </button>
             </For>
+        </div>
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timeline marker interaction helpers + components
+// ---------------------------------------------------------------------------
+
+/// "YYYY-MM-DDTHH:MM" in local time for a datetime-local input, from an ISO string.
+fn iso_to_datetime_local(iso: &str) -> String {
+    let ms = js_sys::Date::parse(iso);
+    if ms.is_nan() {
+        return String::new();
+    }
+    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms));
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}",
+        d.get_full_year() as i32,
+        d.get_month() as i32 + 1,
+        d.get_date() as i32,
+        d.get_hours() as i32,
+        d.get_minutes() as i32
+    )
+}
+
+/// Parse a datetime-local string (local time) back to epoch ms. Appends
+/// seconds so the string is an unambiguous ES date-time form.
+fn datetime_local_to_ms(s: &str) -> Option<f64> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let v = if t.len() == 16 {
+        js_sys::Date::parse(&format!("{t}:00"))
+    } else {
+        js_sys::Date::parse(t)
+    };
+    if v.is_nan() { None } else { Some(v) }
+}
+
+/// One session strip chip: colored dot + type name + HH:MM start time.
+#[component]
+fn SessionChip(
+    session: AgogeSession,
+    types: ReadSignal<Vec<AgogeType>>,
+    on_zoom: Callback<AgogeSession>,
+) -> impl IntoView {
+    let sid = session.type_id.clone();
+    let name = {
+        let sid = sid.clone();
+        move || {
+            sid.as_ref()
+                .and_then(|tid| types.get().into_iter().find(|t| &t.id == tid))
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| "Undefined".to_string())
+        }
+    };
+    let color = {
+        let sid = sid.clone();
+        move || {
+            sid.as_ref()
+                .and_then(|tid| types.get().into_iter().find(|t| &t.id == tid))
+                .map(|t| t.color_code.clone())
+                .unwrap_or_else(|| "#7B0000".to_string())
+        }
+    };
+    let hhmm = ms_from_iso(&session.start_time)
+        .map(|ms| {
+            let iso = iso_from_ms(ms);
+            if iso.len() >= 16 { iso[11..16].to_string() } else { iso }
+        })
+        .unwrap_or_default();
+    let s = session.clone();
+    view! {
+        <button class="session-chip" on:click=move |_| on_zoom.call(s.clone())>
+            <span class="dot" style=move || format!("background:{}", color())></span>
+            <span class="chip-name">{move || name()}</span>
+            <span class="chip-time">{hhmm}</span>
+        </button>
+    }
+}
+
+/// Inline editor for a selected session (type / start / end / actions).
+#[component]
+fn SessionEditor(
+    session: AgogeSession,
+    types: ReadSignal<Vec<AgogeType>>,
+    on_save: Callback<(String, String, String, String)>,
+    on_delete: Callback<String>,
+    on_close: Callback<String>,
+) -> impl IntoView {
+    let is_active = session.status == "active";
+    let id = session.id.clone();
+    let (type_id, set_type_id) = create_signal(session.type_id.clone().unwrap_or_default());
+    let (start, set_start) = create_signal(iso_to_datetime_local(&session.start_time));
+    let (end, set_end) = create_signal(session.end_time.as_deref().map(iso_to_datetime_local).unwrap_or_default());
+    let id_save = id.clone();
+    let id_delete = id.clone();
+    let id_close = id.clone();
+    view! {
+        <div class="session-editor">
+            <label class="ctl">"TYPE"
+                <select prop:value=type_id on:change=move |ev| set_type_id.set(event_target_value(&ev))>
+                    <option value="">"UNDEFINED"</option>
+                    <For each=move || types.get() key=|t| t.id.clone() let:t>
+                        <option value=t.id.clone()>{t.name.clone()}</option>
+                    </For>
+                </select>
+            </label>
+            <label class="ctl">"START"
+                <input type="datetime-local" prop:value=start on:input=move |ev| set_start.set(event_target_value(&ev)) />
+            </label>
+            <label class="ctl">"END"
+                <input type="datetime-local" prop:value=end on:input=move |ev| set_end.set(event_target_value(&ev)) />
+            </label>
+            <button class="btn" on:click=move |_| on_save.call((id_save.clone(), type_id.get(), start.get(), end.get()))>"SAVE"</button>
+            <button class="btn danger" on:click=move |_| on_delete.call(id_delete.clone())>"DELETE"</button>
+            {is_active.then(|| view! {
+                <button class="btn" on:click=move |_| on_close.call(id_close.clone())>"CLOSE NOW"</button>
+            })}
         </div>
     }
 }

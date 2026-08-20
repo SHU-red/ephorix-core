@@ -52,8 +52,10 @@ extern "C" {
     fn ephorix_set_series_show(id: u32, series_idx: u32, show: bool);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = onDrag)]
     fn ephorix_on_drag(id: u32, cb: &js_sys::Function);
+    #[wasm_bindgen(js_namespace = EphoriX, js_name = onClick)]
+    fn ephorix_on_click(id: u32, cb: &js_sys::Function);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = zoomTo)]
-    fn ephorix_zoom_to(id: u32, x0: f64, x1: f64, y0: f64, y1: f64, dir: &str);
+    pub fn ephorix_zoom_to(id: u32, x0: f64, x1: f64, y0: f64, y1: f64, dir: &str);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = onCursor)]
     fn ephorix_on_cursor(id: u32, cb: &js_sys::Function);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = valToPos)]
@@ -103,6 +105,9 @@ pub fn TimelineChart(
     zoom_mode: ReadSignal<bool>,
     clear_trigger: RwSignal<u32>,
     reset_zoom: RwSignal<u32>,
+    on_click_at: Callback<f64>,
+    on_ready: Callback<u32>,
+    on_session_click: Callback<String>,
 ) -> impl IntoView {
     let chart_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let overlay_ref: NodeRef<leptos::html::Div> = create_node_ref();
@@ -160,6 +165,7 @@ pub fn TimelineChart(
                 &data.to_string(),
             );
             chart_id.set(id);
+            on_ready.call(id);
 
             let drag_cb = Closure::wrap(Box::new(move |json: String| {
                 let Ok(r) = serde_json::from_str::<DragRect>(&json) else { return };
@@ -177,6 +183,12 @@ pub fn TimelineChart(
             }) as Box<dyn FnMut(Option<f64>)>);
             ephorix_on_cursor(id, cur_cb.as_ref().unchecked_ref());
             cur_cb.forget();
+
+            let click_cb = Closure::wrap(Box::new(move |ts: f64| {
+                on_click_at.call(ts);
+            }) as Box<dyn FnMut(f64)>);
+            ephorix_on_click(id, click_cb.as_ref().unchecked_ref());
+            click_cb.forget();
         }
     });
 
@@ -243,18 +255,63 @@ pub fn TimelineChart(
     });
 
     view! {
-        <div class="chart-wrap">
-            <div node_ref=chart_ref class="chart" id="ephorix-chart"></div>
-            <div node_ref=overlay_ref class="session-overlay"></div>
-            <Show when=move || points.get().is_empty() fallback=|| ()>
-                <div class="chart-empty">
-                    <span class="chart-empty-mark" inner_html=crate::icons::LAMBDA></span>
-                    <p>"NO DATA"</p>
+        <div class="chart-row">
+            <div class="chart-wrap">
+                <div node_ref=chart_ref class="chart" id="ephorix-chart"></div>
+                <div node_ref=overlay_ref class="session-overlay" on:click=move |ev| {
+                    let hit = ev
+                        .target()
+                        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                        .and_then(|el| el.closest("[data-session-id]").ok().flatten());
+                    if let Some(el) = hit {
+                        if let Some(sid) = el.get_attribute("data-session-id") {
+                            ev.stop_propagation();
+                            ev.prevent_default();
+                            on_session_click.call(sid);
+                        }
+                    }
+                }></div>
+                <Show when=move || points.get().is_empty() fallback=|| ()>
+                    <div class="chart-empty">
+                        <span class="chart-empty-mark" inner_html=crate::icons::LAMBDA></span>
+                        <p>"NO DATA"</p>
+                    </div>
+                </Show>
+            </div>
+            <aside class="legend-sidebar">
+                <div class="legend-item">
+                    <span class="legend-swatch" style="background:#e53935"></span>
+                    <span class="legend-name">"Heart rate"</span>
+                    <span class="legend-unit">"bpm"</span>
                 </div>
-            </Show>
+                <div class="legend-item">
+                    <span class="legend-swatch" style="background:#4fc3f7"></span>
+                    <span class="legend-name">"Steps"</span>
+                    <span class="legend-unit">"count"</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-swatch" style="background:#ffa726"></span>
+                    <span class="legend-name">"Active kcal"</span>
+                    <span class="legend-unit">"kcal"</span>
+                </div>
+            </aside>
         </div>
-        <div class="battery-wrap">
-            <div node_ref=battery_ref class="chart" id="ephorix-battery-chart"></div>
+        <div class="chart-row">
+            <div class="battery-wrap">
+                <div node_ref=battery_ref class="chart" id="ephorix-battery-chart"></div>
+            </div>
+            <aside class="legend-sidebar">
+                <div class="legend-item">
+                    <span class="legend-swatch" style="background:#90a4ae"></span>
+                    <span class="legend-name">"Stress"</span>
+                    <span class="legend-unit">"0-100"</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-swatch" style="background:#e53935"></span>
+                    <span class="legend-name">"Body battery"</span>
+                    <span class="legend-unit">"0-300"</span>
+                </div>
+            </aside>
         </div>
     }
 }
@@ -262,8 +319,8 @@ pub fn TimelineChart(
 fn build_opts(width: i32) -> serde_json::Value {
     json!({
         "width": width,
-        "height": 380,
-        "legend": { "show": true, "live": true },
+        "height": 440,
+        "legend": { "show": false },
         "cursor": { "show": true, "points": { "show": true } },
         "select": { "show": false },
         "scales": {
@@ -273,24 +330,27 @@ fn build_opts(width: i32) -> serde_json::Value {
             "y3": { "range": [0, null] }
         },
         "axes": [
-            { "side": 2, "size": 32, "stroke": "#3a3a3a", "grid": { "stroke": "#161616" },
+            { "side": 2, "size": 32, "stroke": "#3a3a3a", "grid": { "show": false },
               "ticks": { "size": 80 }, "font": "10px 'IBM Plex Mono', monospace",
               "values": "__ephorix_time__" },
-            { "side": 3, "size": 46, "stroke": "#e53935", "grid": { "stroke": "#141414" },
-              "ticks": { "size": 60 }, "font": "10px 'IBM Plex Mono', monospace" },
-            { "side": 3, "size": 38, "scale": "y2", "stroke": "#4a4a4a", "grid": { "show": false },
-              "ticks": { "size": 70 }, "font": "10px 'IBM Plex Mono', monospace" },
-            { "side": 1, "size": 38, "scale": "y3", "stroke": "#7a3a3a", "grid": { "show": false },
-              "ticks": { "size": 70 }, "font": "10px 'IBM Plex Mono', monospace" }
+            { "side": 3, "size": 46, "stroke": "#e53935", "grid": { "show": true, "stroke": "#141414" },
+              "ticks": { "size": 50 }, "font": "10px 'IBM Plex Mono', monospace" },
+            { "side": 1, "size": 46, "scale": "y2", "stroke": "#4fc3f7", "grid": { "show": false },
+              "ticks": { "size": 50 }, "font": "10px 'IBM Plex Mono', monospace" },
+            { "side": 1, "size": 46, "scale": "y3", "stroke": "#ffa726", "grid": { "show": false },
+              "ticks": { "size": 50 }, "font": "10px 'IBM Plex Mono', monospace" }
         ],
         "series": [
             {},
             { "label": "Heart rate (bpm)", "stroke": "#e53935", "width": 2.5,
-              "fill": "rgba(229, 57, 53, 0.10)", "points": { "show": false } },
-            { "label": "Steps", "stroke": "#8f8f8f", "fill": "rgba(143, 143, 143, 0.14)",
-              "scale": "y2", "bars": true, "points": { "show": false } },
-            { "label": "Active kcal", "stroke": "#ff5252", "width": 1.5, "dash": [6, 4],
-              "scale": "y3", "points": { "show": false } }
+              "fill": "rgba(229, 57, 53, 0.10)", "tooltip": "HR",
+              "points": { "show": "hover", "size": 3, "width": 1 } },
+            { "label": "Steps", "stroke": "#4fc3f7", "fill": "rgba(79, 195, 247, 0.18)",
+              "scale": "y2", "bars": true, "tooltip": "Steps",
+              "points": { "show": "hover", "size": 3, "width": 1 } },
+            { "label": "Active kcal", "stroke": "#ffa726", "width": 2, "dash": [6, 4],
+              "scale": "y3", "tooltip": "kcal",
+              "points": { "show": "hover", "size": 3, "width": 1 } }
         ]
     })
 }
@@ -307,8 +367,8 @@ fn build_data(points: Vec<TimelinePoint>) -> serde_json::Value {
 fn build_battery_opts(width: i32) -> serde_json::Value {
     json!({
         "width": width,
-        "height": 150,
-        "legend": { "show": true, "live": true },
+        "height": 180,
+        "legend": { "show": false },
         "cursor": { "show": true },
         "select": { "show": false },
         "scales": {
@@ -317,19 +377,21 @@ fn build_battery_opts(width: i32) -> serde_json::Value {
             "y2": { "range": [0, 300] }
         },
         "axes": [
-            { "side": 2, "size": 22, "stroke": "#3a3a3a", "grid": { "stroke": "#161616" },
+            { "side": 2, "size": 32, "stroke": "#3a3a3a", "grid": { "show": false },
               "ticks": { "size": 80 }, "font": "10px 'IBM Plex Mono', monospace",
               "values": "__ephorix_time__" },
-            { "side": 3, "size": 36, "stroke": "#8f8f8f", "grid": { "show": false },
-              "ticks": { "size": 70 }, "font": "10px 'IBM Plex Mono', monospace" },
-            { "side": 1, "size": 36, "scale": "y2", "stroke": "#e53935", "grid": { "show": false },
-              "ticks": { "size": 70 }, "font": "10px 'IBM Plex Mono', monospace" }
+            { "side": 3, "size": 46, "stroke": "#90a4ae", "grid": { "show": true, "stroke": "#141414" },
+              "ticks": { "size": 50 }, "font": "10px 'IBM Plex Mono', monospace" },
+            { "side": 1, "size": 46, "scale": "y2", "stroke": "#e53935", "grid": { "show": false },
+              "ticks": { "size": 50 }, "font": "10px 'IBM Plex Mono', monospace" },
+            { "side": 1, "size": 46, "stroke": "transparent", "grid": { "show": false },
+              "ticks": { "show": false }, "border": { "show": false }, "values": [] }
         ],
         "series": [
             {},
-            { "label": "Stress", "stroke": "#8f8f8f", "width": 1.5, "points": { "show": false } },
+            { "label": "Stress", "stroke": "#90a4ae", "width": 1.5, "points": { "show": false } },
             { "label": "Body battery", "stroke": "#e53935", "width": 2.5, "scale": "y2",
-              "fill": "rgba(229, 57, 53, 0.12)", "points": { "show": false } }
+              "fill": "rgba(229, 57, 53, 0.15)", "points": { "show": false } }
         ]
     })
 }
@@ -340,6 +402,22 @@ fn build_battery_data(points: Vec<BatterySeriesPoint>) -> serde_json::Value {
     let stress: Vec<Option<f64>> = points.iter().map(|p| Some(p.stress)).collect();
     let battery: Vec<Option<f64>> = points.iter().map(|p| Some(p.battery)).collect();
     json!([xs, stress, battery])
+}
+
+/// Darken a `#rrggbb` color by scaling each channel toward black, used for the
+/// session bar's 1px border so it reads darker than the fill.
+fn darken_hex(hex: &str, factor: f32) -> String {
+    let h = hex.trim_start_matches('#');
+    if h.len() != 6 {
+        return "#000000".to_string();
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).unwrap_or(0);
+    let g = u8::from_str_radix(&h[2..4], 16).unwrap_or(0);
+    let b = u8::from_str_radix(&h[4..6], 16).unwrap_or(0);
+    let dr = (r as f32 * factor) as u8;
+    let dg = (g as f32 * factor) as u8;
+    let db = (b as f32 * factor) as u8;
+    format!("#{dr:02x}{dg:02x}{db:02x}")
 }
 
 fn render_overlay(
@@ -393,11 +471,18 @@ fn render_overlay(
             .dyn_into::<web_sys::HtmlDivElement>()
             .unwrap();
         el.set_class_name(if s.status == "active" { "session-bar open" } else { "session-bar" });
+        let _ = el.set_attribute("data-session-id", &s.id);
         let _ = el.set_attribute("title", &format!("{name} · {} – {}", fmt_time(from), fmt_time(to)));
         let _ = el.set_attribute(
             "style",
-            &format!("position:absolute;top:0;bottom:0;left:{left}px;width:{w}px;background:{color};"),
+            &format!("position:absolute;top:0;bottom:0;left:{left}px;width:{w}px;background:{color};border:1px solid {};", darken_hex(&color, 0.55)),
         );
+        if w > 60.0 {
+            let label = doc.create_element("span").unwrap();
+            label.set_class_name("session-bar-name");
+            label.set_text_content(Some(name.as_str()));
+            let _ = el.append_child(&label);
+        }
         let _ = container.append_child(&el);
     }
 
