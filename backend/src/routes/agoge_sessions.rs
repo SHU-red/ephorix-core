@@ -175,6 +175,87 @@ pub async fn delete(
     Ok(Json(json!({ "deleted": id })))
 }
 
+/// Aggregate stats for one session: duration, pause time, and measurement
+/// rollups over [start_time, end_time ?? now()].
+pub async fn stats(
+    State(pool): State<PgPool>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let session = sqlx::query_as::<_, AgogeSession>(
+        "SELECT * FROM agoge_sessions WHERE id = $1 AND user_id = $2",
+    )
+    .bind(id)
+    .bind(user.0)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("session {id} not found")))?;
+
+    let end = session.end_time.unwrap_or_else(Utc::now);
+    let duration_sec = (end - session.start_time).num_seconds();
+
+    // Each 'pause' pairs with the next 'resume'; a trailing unpaired pause
+    // runs to the end of the window.
+    let markers: Vec<(String, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT kind, occurred_at FROM agoge_markers
+         WHERE user_id = $1 AND kind IN ('pause', 'resume')
+           AND occurred_at >= $2 AND occurred_at < $3
+         ORDER BY occurred_at",
+    )
+    .bind(user.0)
+    .bind(session.start_time)
+    .bind(end)
+    .fetch_all(&pool)
+    .await?;
+
+    let mut pause_sec: i64 = 0;
+    let mut open_pause: Option<DateTime<Utc>> = None;
+    for (kind, at) in &markers {
+        match kind.as_str() {
+            "pause" => {
+                if open_pause.is_none() {
+                    open_pause = Some(*at);
+                }
+            }
+            "resume" => {
+                if let Some(p) = open_pause.take() {
+                    pause_sec += (*at - p).num_seconds();
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(p) = open_pause {
+        pause_sec += (end - p).num_seconds();
+    }
+
+    let agg: (f64, f64, f64, f64) = sqlx::query_as(
+        "SELECT
+            COALESCE(SUM(value) FILTER (WHERE metric = 'reps'), 0)::float8,
+            COALESCE(SUM(value) FILTER (WHERE metric = 'active_calories'), 0)::float8,
+            COALESCE(AVG(value) FILTER (WHERE metric = 'heart_rate'), 0)::float8,
+            COALESCE(MAX(value) FILTER (WHERE metric = 'heart_rate'), 0)::float8
+         FROM measurements
+         WHERE user_id = $1 AND ts >= $2 AND ts < $3
+           AND metric IN ('reps', 'active_calories', 'heart_rate')",
+    )
+    .bind(user.0)
+    .bind(session.start_time)
+    .bind(end)
+    .fetch_one(&pool)
+    .await?;
+
+    Ok(Json(json!({
+        "durationSec": duration_sec,
+        "activeSec": duration_sec - pause_sec,
+        "pauseSec": pause_sec,
+        "reps": agg.0.round() as i64,
+        "calories": agg.1,
+        "avgHr": agg.2,
+        "peakHr": agg.3.round() as i64,
+    })))
+}
+
 fn validate_times(start: DateTime<Utc>, end: Option<DateTime<Utc>>) -> ApiResult<()> {
     if let Some(e) = end {
         if e < start {

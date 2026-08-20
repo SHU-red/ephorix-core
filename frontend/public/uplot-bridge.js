@@ -11,6 +11,7 @@
  *    vertical drag -> full-width band (y-only), diagonal -> box (both)
  *  - zoom-level-aware time axis labels (hours / days / weeks / months / years)
  *  - cursor time + coordinate mapping for the session overlay
+ *  - x-scale change listeners (DOM overlays that must track the zoom)
  */
 (function (global) {
   "use strict";
@@ -167,6 +168,7 @@
     }
     links.delete(id);
     interactions.delete(id);
+    scaleCbs.delete(id);
   }
 
   /* ------------------------------------------------------------------------
@@ -181,10 +183,29 @@
   var links = new Map();   // chart id -> group id
   var groups = new Map();  // group id -> { ids: Set, full: [min,max] | null }
   var nextGroupId = 1;
+  var scaleCbs = new Map(); // chart id -> Set of x-scale-change callbacks
 
   function groupOf(id) {
     var gid = links.get(id);
     return gid == null ? null : groups.get(gid);
+  }
+
+  /* x-scale change listeners: cb() fires (no args) after the chart's x-scale
+     changes via any path below (zoom, reset, setData resync, link). */
+  function onScaleChange(id, cb) {
+    var set = scaleCbs.get(id);
+    if (!set) { set = new Set(); scaleCbs.set(id, set); }
+    set.add(cb);
+  }
+
+  function fireScaleChange(id) {
+    // uPlot applies setScale on the next animation frame; defer so callbacks
+    // read the post-zoom scale (overlay/strip re-position correctly).
+    requestAnimationFrame(function () {
+      var set = scaleCbs.get(id);
+      if (!set || set.size === 0) return;
+      set.forEach(function (cb) { cb(); });
+    });
   }
 
   function setGroupX(group, lo, hi) {
@@ -193,6 +214,7 @@
     group.ids.forEach(function (id) {
       var c = charts.get(id);
       if (c) c.setScale("x", { min: lo, max: hi });
+      fireScaleChange(id);
     });
   }
 
@@ -257,6 +279,7 @@
         setGroupX(group, Math.min(x0, x1), Math.max(x0, x1));
       } else {
         c.setScale("x", { min: Math.min(x0, x1), max: Math.max(x0, x1) });
+        fireScaleChange(id);
       }
     }
     if (dir !== "x") {
@@ -277,10 +300,12 @@
         group.ids.forEach(function (gid) {
           var cc = charts.get(gid);
           if (cc) cc.setScale("x", { min: null, max: null });
+          fireScaleChange(gid);
         });
       }
     } else {
       c.setScale("x", { min: null, max: null });
+      fireScaleChange(id);
     }
     c.setScale("y", { min: null, max: null });
     if (c.scales.y2) c.setScale("y2", { min: null, max: null });
@@ -503,6 +528,7 @@
     destroy: destroy,
     onDrag: onDrag,
     onClick: onClick,
+    onScaleChange: onScaleChange,
     zoomTo: zoomTo,
     setZoomMode: setZoomMode,
     linkX: linkX,

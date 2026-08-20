@@ -1,4 +1,5 @@
-//! uPlot timeline component: raw health metrics + Agoge session overlay bars.
+//! uPlot timeline component: raw health metrics, sleep/nutrition overlay, and
+//! the workout timeline strip between the main chart and the body-battery chart.
 //!
 //! Downsampling strategy: the client asks the server for a bucket size that
 //! yields <= ~800 points over the visible range (`nice_bucket`); the server
@@ -54,6 +55,8 @@ extern "C" {
     fn ephorix_on_drag(id: u32, cb: &js_sys::Function);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = onClick)]
     fn ephorix_on_click(id: u32, cb: &js_sys::Function);
+    #[wasm_bindgen(js_namespace = EphoriX, js_name = onScaleChange)]
+    fn ephorix_on_scale_change(id: u32, cb: &js_sys::Function);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = zoomTo)]
     pub fn ephorix_zoom_to(id: u32, x0: f64, x1: f64, y0: f64, y1: f64, dir: &str);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = onCursor)]
@@ -102,6 +105,7 @@ pub fn TimelineChart(
     series: ReadSignal<SeriesConfig>,
     selection: WriteSignal<Option<(f64, f64)>>,
     cursor: WriteSignal<Option<f64>>,
+    pick_mode: ReadSignal<bool>,
     zoom_mode: ReadSignal<bool>,
     clear_trigger: RwSignal<u32>,
     reset_zoom: RwSignal<u32>,
@@ -114,6 +118,10 @@ pub fn TimelineChart(
     let chart_id = create_rw_signal(0u32);
     let battery_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let battery_id = create_rw_signal(0u32);
+    let workout_ref: NodeRef<leptos::html::Div> = create_node_ref();
+    // Bumped by the bridge after every x-scale change (zoom, reset, data
+    // resync) so plot-relative overlays re-position with the new domain.
+    let zoom_version = create_rw_signal(0u32);
 
     // Destroy uPlot instances when this component unmounts (tab switch).
     on_cleanup(move || {
@@ -185,10 +193,22 @@ pub fn TimelineChart(
             cur_cb.forget();
 
             let click_cb = Closure::wrap(Box::new(move |ts: f64| {
+                if pick_mode.get_untracked() {
+                    // Pick mode: this click is a time pick — plant the cursor
+                    // at the picked instant, not just route the click up.
+                    cursor.set(Some(ts));
+                }
                 on_click_at.call(ts);
             }) as Box<dyn FnMut(f64)>);
             ephorix_on_click(id, click_cb.as_ref().unchecked_ref());
             click_cb.forget();
+
+            let zv = zoom_version;
+            let scale_cb = Closure::wrap(Box::new(move || {
+                zv.update(|v| *v += 1);
+            }) as Box<dyn FnMut()>);
+            ephorix_on_scale_change(id, scale_cb.as_ref().unchecked_ref());
+            scale_cb.forget();
         }
     });
 
@@ -237,40 +257,58 @@ pub fn TimelineChart(
         ephorix_set_series_show(id, 3, s.calories);
     });
 
-    // Re-render the overlay (session bars + sleep bands + nutrition markers)
-    // when any of its inputs change.
+    // Re-render the overlay (sleep bands + nutrition markers) when its inputs
+    // change or the x-scale moves, so the markers stay aligned with the data.
+    create_effect(move |_| {
+        let id = chart_id.get();
+        if id == 0 {
+            return;
+        }
+        let nut = nutrition.get();
+        let slp = sleep.get();
+        let _ = points.get(); // re-render once raw data is charted
+        let _ = zoom_version.get();
+        if let Some(overlay) = overlay_ref.get() {
+            render_overlay(&overlay, id, &nut, &slp);
+        }
+    });
+
+    // Re-render the workout strip when sessions or types change, or the
+    // x-scale moves (zoom_version), so the slots track the current domain.
     create_effect(move |_| {
         let id = chart_id.get();
         if id == 0 {
             return;
         }
         let sess = sessions.get();
-        let types = types.get();
-        let nut = nutrition.get();
-        let slp = sleep.get();
-        let _ = points.get(); // re-render once raw data is charted
-        if let Some(overlay) = overlay_ref.get() {
-            render_overlay(&overlay, id, &sess, &types, &nut, &slp);
+        let ty = types.get();
+        let _ = zoom_version.get();
+        if let Some(strip) = workout_ref.get() {
+            render_workout_strip(&strip, id, &sess, &ty);
         }
     });
+
+    // Slot/marker click: resolve the nearest [data-session-id] ancestor and
+    // hand the session id to the parent for inline editing.
+    let on_marker_click = move |ev: web_sys::MouseEvent| {
+        let hit = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            .and_then(|el| el.closest("[data-session-id]").ok().flatten());
+        if let Some(el) = hit {
+            if let Some(sid) = el.get_attribute("data-session-id") {
+                ev.stop_propagation();
+                ev.prevent_default();
+                on_session_click.call(sid);
+            }
+        }
+    };
 
     view! {
         <div class="chart-row">
             <div class="chart-wrap">
                 <div node_ref=chart_ref class="chart" id="ephorix-chart"></div>
-                <div node_ref=overlay_ref class="session-overlay" on:click=move |ev| {
-                    let hit = ev
-                        .target()
-                        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-                        .and_then(|el| el.closest("[data-session-id]").ok().flatten());
-                    if let Some(el) = hit {
-                        if let Some(sid) = el.get_attribute("data-session-id") {
-                            ev.stop_propagation();
-                            ev.prevent_default();
-                            on_session_click.call(sid);
-                        }
-                    }
-                }></div>
+                <div node_ref=overlay_ref class="session-overlay" on:click=on_marker_click></div>
                 <Show when=move || points.get().is_empty() fallback=|| ()>
                     <div class="chart-empty">
                         <span class="chart-empty-mark" inner_html=crate::icons::LAMBDA></span>
@@ -296,6 +334,16 @@ pub fn TimelineChart(
                 </div>
             </aside>
         </div>
+        <div class="workout-row">
+            <div class="workout-gutter"></div>
+            <div node_ref=workout_ref class="workout-strip" on:click=on_marker_click></div>
+            <div class="workout-gutter-right"></div>
+            <aside class="legend-sidebar">
+                <div class="legend-item">
+                    <span class="legend-name">"WORKOUTS"</span>
+                </div>
+            </aside>
+        </div>
         <div class="chart-row">
             <div class="battery-wrap">
                 <div node_ref=battery_ref class="chart" id="ephorix-battery-chart"></div>
@@ -304,7 +352,7 @@ pub fn TimelineChart(
                 <div class="legend-item">
                     <span class="legend-swatch" style="background:#90a4ae"></span>
                     <span class="legend-name">"Stress"</span>
-                    <span class="legend-unit">"0-100"</span>
+                    <span class="legend-unit">"0-300"</span>
                 </div>
                 <div class="legend-item">
                     <span class="legend-swatch" style="background:#e53935"></span>
@@ -343,13 +391,13 @@ fn build_opts(width: i32) -> serde_json::Value {
         "series": [
             {},
             { "label": "Heart rate (bpm)", "stroke": "#e53935", "width": 2.5,
-              "fill": "rgba(229, 57, 53, 0.10)", "tooltip": "HR",
+              "fill": "rgba(229, 57, 53, 0.10)", "tooltip": "HR", "spanGaps": false,
               "points": { "show": "hover", "size": 3, "width": 1 } },
             { "label": "Steps", "stroke": "#4fc3f7", "fill": "rgba(79, 195, 247, 0.18)",
-              "scale": "y2", "bars": true, "tooltip": "Steps",
+              "scale": "y2", "bars": true, "tooltip": "Steps", "spanGaps": false,
               "points": { "show": "hover", "size": 3, "width": 1 } },
-            { "label": "Active kcal", "stroke": "#ffa726", "width": 2, "dash": [6, 4],
-              "scale": "y3", "tooltip": "kcal",
+            { "label": "Active kcal", "stroke": "#ffa726", "width": 2,
+              "scale": "y3", "tooltip": "kcal", "spanGaps": false,
               "points": { "show": "hover", "size": 3, "width": 1 } }
         ]
     })
@@ -373,7 +421,7 @@ fn build_battery_opts(width: i32) -> serde_json::Value {
         "select": { "show": false },
         "scales": {
             "x": { "time": true },
-            "y": { "range": [0, 100] },
+            "y": { "range": [0, 300] },
             "y2": { "range": [0, 300] }
         },
         "axes": [
@@ -389,9 +437,12 @@ fn build_battery_opts(width: i32) -> serde_json::Value {
         ],
         "series": [
             {},
-            { "label": "Stress", "stroke": "#90a4ae", "width": 1.5, "points": { "show": false } },
+            { "label": "Stress", "stroke": "#90a4ae", "width": 1.5,
+              "fill": "rgba(144, 164, 174, 0.5)", "bars": true, "spanGaps": false,
+              "points": { "show": false } },
             { "label": "Body battery", "stroke": "#e53935", "width": 2.5, "scale": "y2",
-              "fill": "rgba(229, 57, 53, 0.15)", "points": { "show": false } }
+              "fill": "rgba(229, 57, 53, 0.15)", "spanGaps": false,
+              "points": { "show": false } }
         ]
     })
 }
@@ -404,27 +455,9 @@ fn build_battery_data(points: Vec<BatterySeriesPoint>) -> serde_json::Value {
     json!([xs, stress, battery])
 }
 
-/// Darken a `#rrggbb` color by scaling each channel toward black, used for the
-/// session bar's 1px border so it reads darker than the fill.
-fn darken_hex(hex: &str, factor: f32) -> String {
-    let h = hex.trim_start_matches('#');
-    if h.len() != 6 {
-        return "#000000".to_string();
-    }
-    let r = u8::from_str_radix(&h[0..2], 16).unwrap_or(0);
-    let g = u8::from_str_radix(&h[2..4], 16).unwrap_or(0);
-    let b = u8::from_str_radix(&h[4..6], 16).unwrap_or(0);
-    let dr = (r as f32 * factor) as u8;
-    let dg = (g as f32 * factor) as u8;
-    let db = (b as f32 * factor) as u8;
-    format!("#{dr:02x}{dg:02x}{db:02x}")
-}
-
 fn render_overlay(
     container: &leptos::html::HtmlElement<leptos::html::Div>,
     chart_id: u32,
-    sessions: &[AgogeSession],
-    types: &[AgogeType],
     nutrition: &[NutritionEvent],
     sleep: &[SleepDay],
 ) {
@@ -444,47 +477,6 @@ fn render_overlay(
             bbox.left, bbox.top, bbox.width, bbox.height
         ),
     );
-
-    let now = js_sys::Date::now();
-    for s in sessions {
-        let Some(from) = ms_from_iso(&s.start_time) else { continue };
-        let to = s.end_time.as_deref().and_then(ms_from_iso).unwrap_or(now);
-        if to < from {
-            continue;
-        }
-        let x = ephorix_val_to_pos(chart_id, from);
-        let x2 = ephorix_val_to_pos(chart_id, to);
-        let left = x.min(x2).max(0.0);
-        let right = x.max(x2).min(bbox.width);
-        if right - left < 1.0 {
-            continue; // entirely off-screen (e.g. an open session past the data)
-        }
-        let w = right - left;
-
-        let matched = s.type_id.as_ref().and_then(|tid| types.iter().find(|t| &t.id == tid));
-        let color = matched.map(|t| t.color_code.clone()).unwrap_or_else(|| "#7B0000".to_string());
-        let name = matched.map(|t| t.name.clone()).unwrap_or_else(|| "Undefined".to_string());
-
-        let el = doc
-            .create_element("div")
-            .unwrap()
-            .dyn_into::<web_sys::HtmlDivElement>()
-            .unwrap();
-        el.set_class_name(if s.status == "active" { "session-bar open" } else { "session-bar" });
-        let _ = el.set_attribute("data-session-id", &s.id);
-        let _ = el.set_attribute("title", &format!("{name} · {} – {}", fmt_time(from), fmt_time(to)));
-        let _ = el.set_attribute(
-            "style",
-            &format!("position:absolute;top:0;bottom:0;left:{left}px;width:{w}px;background:{color};border:1px solid {};", darken_hex(&color, 0.55)),
-        );
-        if w > 60.0 {
-            let label = doc.create_element("span").unwrap();
-            label.set_class_name("session-bar-name");
-            label.set_text_content(Some(name.as_str()));
-            let _ = el.append_child(&label);
-        }
-        let _ = container.append_child(&el);
-    }
 
     // Sleep bands: a thin strip at the bottom, one per day. Sleep is a daily
     // sum on the watch, so the band is anchored at an assumed 07:00 wake and
@@ -538,6 +530,67 @@ fn render_overlay(
             "style",
             &format!("position:absolute;left:{x}px;top:0;width:7px;height:7px;background:{color};"),
         );
+        let _ = container.append_child(&el);
+    }
+}
+
+/// "HH:MM" in local time, for workout slot labels.
+fn hhmm(ms: f64) -> String {
+    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms));
+    format!("{:02}:{:02}", d.get_hours(), d.get_minutes())
+}
+
+/// Workout timeline strip: one labeled, colored slot per session, positioned
+/// in plot-relative px (like `render_overlay`) so the slots track the
+/// current x-domain as the user zooms.
+fn render_workout_strip(
+    container: &leptos::html::HtmlElement<leptos::html::Div>,
+    chart_id: u32,
+    sessions: &[AgogeSession],
+    types: &[AgogeType],
+) {
+    let doc = web_sys::window().unwrap().document().unwrap();
+    container.set_inner_html("");
+
+    let bbox: BBox = serde_json::from_str(&ephorix_plot_bbox(chart_id))
+        .unwrap_or(BBox { left: 0.0, top: 0.0, width: 0.0, height: 0.0 });
+    if bbox.width <= 0.0 {
+        return;
+    }
+
+    let now = js_sys::Date::now();
+    for s in sessions {
+        let Some(from) = ms_from_iso(&s.start_time) else { continue };
+        let to = s.end_time.as_deref().and_then(ms_from_iso).unwrap_or(now);
+        if to < from {
+            continue;
+        }
+        let x = ephorix_val_to_pos(chart_id, from);
+        let x2 = ephorix_val_to_pos(chart_id, to);
+        let left = x.min(x2).max(0.0);
+        let right = x.max(x2).min(bbox.width);
+        if right - left < 1.0 {
+            continue; // entirely off-screen (e.g. an open session past the data)
+        }
+        let w = right - left;
+
+        let matched = s.type_id.as_ref().and_then(|tid| types.iter().find(|t| &t.id == tid));
+        let color = matched.map(|t| t.color_code.clone()).unwrap_or_else(|| "#7B0000".to_string());
+        let name = matched.map(|t| t.name.clone()).unwrap_or_else(|| "Undefined".to_string());
+
+        let el = doc
+            .create_element("div")
+            .unwrap()
+            .dyn_into::<web_sys::HtmlDivElement>()
+            .unwrap();
+        el.set_class_name(if s.status == "active" { "workout-slot open" } else { "workout-slot" });
+        let _ = el.set_attribute("data-session-id", &s.id);
+        let _ = el.set_attribute("title", &format!("{name} · {} – {}", fmt_time(from), fmt_time(to)));
+        let _ = el.set_attribute("style", &format!("left:{left}px;width:{w}px;background:{color};"));
+        let label = doc.create_element("span").unwrap();
+        label.set_class_name("workout-slot-label");
+        label.set_text_content(Some(&format!("{name}  {}–{}", hhmm(from), hhmm(to))));
+        let _ = el.append_child(&label);
         let _ = container.append_child(&el);
     }
 }

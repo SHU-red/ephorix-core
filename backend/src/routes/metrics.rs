@@ -25,10 +25,11 @@ const RECHARGE_PER_HOUR: f64 = 60.0;
 const MAX_RECHARGE: f64 = 300.0;
 const DRAIN_PER_KCAL: f64 = 0.12;
 const DRAIN_PER_10K_STEPS: f64 = 50.0;
-const DRAIN_PER_STRESS: f64 = 1.5;
+const DRAIN_PER_STRESS: f64 = 0.5; // stress → battery points (300 stress ≈ 150 drain/hr)
 const DRAIN_PER_MOVE: f64 = 0.005; // movement intensity (au) → battery points
 const STRESS_RESTING_HR: f64 = 55.0; // bpm below which stress is 0
-const STRESS_FULL_HR: f64 = 120.0;   // bpm above which stress is 100
+const STRESS_FULL_HR: f64 = 120.0;   // bpm at which the daily 0..100 stress saturates
+const STRESS_SERIES_FULL_HR: f64 = 175.0; // bpm at which series stress is 300 (0..300 scale)
 
 #[derive(Debug, sqlx::FromRow)]
 struct DayAggregate {
@@ -136,20 +137,21 @@ struct SeriesBucket {
     kcal: f64,
     steps: f64,
     movement: f64,
-    avg_hr: f64,
+    avg_hr: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BatterySeriesPoint {
     ts: f64,      // epoch ms
-    stress: f64,  // 0..100
+    stress: f64,  // 0..300
     battery: f64, // 0..300
 }
 
-/// A continuous ("always live") body battery: a running integral over time
-/// buckets. Sleep recharges, activity (kcal/steps/movement) and stress (HR
-/// strain) discharge; the value is clamped to 0..300 each step.
+/// A continuous ("always live") body battery: a running integral over
+/// contiguous time buckets (empty ones forward-fill stress and hold the
+/// battery flat). Sleep recharges, activity (kcal/steps/movement) and stress
+/// (HR strain) discharge; the value is clamped to 0..300 each step.
 pub async fn body_battery_series(
     State(pool): State<PgPool>,
     Extension(user): Extension<AuthUser>,
@@ -163,19 +165,25 @@ pub async fn body_battery_series(
     }
     let bucket = q.bucket.unwrap_or_else(|| "1 hour".to_string());
 
+    // Contiguous buckets: `generate_series` emits every bucket in [from, to)
+    // and the LEFT JOIN keeps the empty ones (zeroed sums, null HR) so the
+    // series has no gaps.
     let rows: Vec<SeriesBucket> = sqlx::query_as(
         "SELECT
-            (EXTRACT(EPOCH FROM time_bucket($1::interval, ts)) * 1000)::float8 AS ts,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'sleep_seconds'), 0)::float8 AS sleep_s,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'active_calories'), 0)::float8 AS kcal,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'steps'), 0)::float8 AS steps,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'movement_intensity'), 0)::float8 AS movement,
-            COALESCE(AVG(value) FILTER (WHERE metric = 'heart_rate'), 0)::float8 AS avg_hr
-         FROM measurements
-         WHERE user_id = $2 AND ts >= $3 AND ts < $4
-           AND metric IN ('sleep_seconds', 'active_calories', 'steps', 'movement_intensity', 'heart_rate')
-         GROUP BY 1
-         ORDER BY 1",
+            (EXTRACT(EPOCH FROM gs.b) * 1000)::float8 AS ts,
+            COALESCE(SUM(m.value) FILTER (WHERE m.metric = 'sleep_seconds'), 0)::float8 AS sleep_s,
+            COALESCE(SUM(m.value) FILTER (WHERE m.metric = 'active_calories'), 0)::float8 AS kcal,
+            COALESCE(SUM(m.value) FILTER (WHERE m.metric = 'steps'), 0)::float8 AS steps,
+            COALESCE(SUM(m.value) FILTER (WHERE m.metric = 'movement_intensity'), 0)::float8 AS movement,
+            AVG(m.value) FILTER (WHERE m.metric = 'heart_rate')::float8 AS avg_hr
+         FROM generate_series($3, $4 - $1::interval, $1::interval) AS gs(b)
+         LEFT JOIN measurements m
+           ON m.user_id = $2
+           AND m.metric IN ('sleep_seconds', 'active_calories', 'steps', 'movement_intensity', 'heart_rate')
+           AND m.ts >= gs.b
+           AND m.ts < gs.b + $1::interval
+         GROUP BY gs.b
+         ORDER BY gs.b",
     )
     .bind(&bucket)
     .bind(user.0)
@@ -185,19 +193,32 @@ pub async fn body_battery_series(
     .await?;
 
     let mut battery = 300.0;
+    let mut last_stress = 0.0;
     let mut points = Vec::with_capacity(rows.len());
     for r in &rows {
-        let stress = if r.avg_hr > STRESS_RESTING_HR {
-            ((r.avg_hr - STRESS_RESTING_HR) / (STRESS_FULL_HR - STRESS_RESTING_HR) * 100.0)
-                .clamp(0.0, 100.0)
-        } else {
-            0.0
+        let empty = r.avg_hr.is_none()
+            && r.sleep_s == 0.0
+            && r.kcal == 0.0
+            && r.steps == 0.0
+            && r.movement == 0.0;
+        let stress = match r.avg_hr {
+            // Linear HR-elevation strain: 55 bpm → 0, 175 bpm → 300.
+            Some(hr) if hr > STRESS_RESTING_HR =>
+                ((hr - STRESS_RESTING_HR) / (STRESS_SERIES_FULL_HR - STRESS_RESTING_HR) * 300.0)
+                    .clamp(0.0, 300.0),
+            Some(_) => 0.0,
+            None => last_stress, // no HR sample: hold the last stress, never null
         };
-        let recharge = r.sleep_s / 3600.0 * RECHARGE_PER_HOUR;
-        let drain = r.kcal * DRAIN_PER_KCAL
-            + r.steps / 10_000.0 * DRAIN_PER_10K_STEPS
-            + r.movement * DRAIN_PER_MOVE;
-        battery = (battery + recharge - drain - stress * DRAIN_PER_STRESS).clamp(0.0, 300.0);
+        // Empty buckets carry the battery forward unchanged (no drain, no
+        // recharge); their stress was already forward-filled above.
+        if !empty {
+            let recharge = r.sleep_s / 3600.0 * RECHARGE_PER_HOUR;
+            let drain = r.kcal * DRAIN_PER_KCAL
+                + r.steps / 10_000.0 * DRAIN_PER_10K_STEPS
+                + r.movement * DRAIN_PER_MOVE;
+            battery = (battery + recharge - drain - stress * DRAIN_PER_STRESS).clamp(0.0, 300.0);
+        }
+        last_stress = stress;
         points.push(BatterySeriesPoint { ts: r.ts, stress, battery });
     }
 

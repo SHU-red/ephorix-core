@@ -80,6 +80,18 @@ pub struct Detection {
     pub proposed_type_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStats {
+    pub duration_sec: i64,
+    pub active_sec: i64,
+    pub pause_sec: i64,
+    pub reps: i64,
+    pub calories: f64,
+    pub avg_hr: f64,
+    pub peak_hr: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Timestamp helpers (avoid chrono in wasm)
 // ---------------------------------------------------------------------------
@@ -246,6 +258,18 @@ pub async fn accept_detection(base: &str, token: &str, id: &str) -> Result<Value
 
 pub async fn reject_detection(base: &str, token: &str, id: &str) -> Result<Value, String> {
     post_json(base, token, &format!("/api/v1/metrics/workouts/{id}/reject"), &json!({})).await
+}
+
+pub async fn fetch_session_stats(base: &str, token: &str, id: &str) -> Result<SessionStats, String> {
+    let v = Request::get(&format!("{base}/api/v1/agoge-sessions/{id}/stats"))
+        .header("X-EphoriX-Token", token)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("invalid json: {e}"))?;
+    serde_json::from_value(v).map_err(|e| format!("stats decode: {e}"))
 }
 
 pub async fn parse_ai(base: &str, token: &str, text: &str) -> Result<Value, String> {

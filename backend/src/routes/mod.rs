@@ -68,6 +68,10 @@ pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
             "/api/v1/agoge-sessions/{id}",
             patch(agoge_sessions::update).delete(agoge_sessions::delete),
         )
+        .route(
+            "/api/v1/agoge-sessions/{id}/stats",
+            get(agoge_sessions::stats),
+        )
         .route("/api/v1/timeline", get(timeline::get_timeline))
         .route(
             "/api/v1/settings",

@@ -1,6 +1,7 @@
-//! Timeline aggregation for the web UI. Raw data is bucketed with the
-//! TimescaleDB `time_bucket` function (server-side downsampling), and Agoge
-//! sessions overlapping the range are returned for overlay rendering.
+//! Timeline aggregation for the web UI. Raw data is bucketed into contiguous
+//! intervals (`generate_series` + LEFT JOIN over TimescaleDB, so empty buckets
+//! still emit rows), and Agoge sessions overlapping the range are returned for
+//! overlay rendering.
 
 use axum::{
     extract::{Extension, Query, State},
@@ -72,16 +73,22 @@ pub async fn get_timeline(
 
     let bucket = validate_bucket(q.bucket.as_deref(), span)?;
 
+    // Contiguous buckets: `generate_series` emits every bucket in [from, to)
+    // and LEFT JOIN keeps empty ones (null HR, zeroed counters) so gaps render
+    // as honest breaks instead of lines spanning missing data.
     let points: Vec<TimelinePoint> = sqlx::query_as(
         "SELECT
-            (EXTRACT(EPOCH FROM time_bucket($1::interval, timestamp)) * 1000)::float8 AS ts,
-            AVG(heart_rate)::float8 AS heart_rate,
-            SUM(steps)::bigint AS steps,
-            SUM(active_calories)::float8 AS active_calories
-         FROM raw_health_data
-         WHERE user_id = $2 AND timestamp >= $3 AND timestamp < $4
-         GROUP BY ts
-         ORDER BY ts",
+            (EXTRACT(EPOCH FROM gs.b) * 1000)::float8 AS ts,
+            AVG(r.heart_rate)::float8 AS heart_rate,
+            COALESCE(SUM(r.steps), 0)::bigint AS steps,
+            COALESCE(SUM(r.active_calories), 0)::float8 AS active_calories
+         FROM generate_series($3, $4 - $1::interval, $1::interval) AS gs(b)
+         LEFT JOIN raw_health_data r
+           ON r.user_id = $2
+           AND r.timestamp >= gs.b
+           AND r.timestamp < gs.b + $1::interval
+         GROUP BY gs.b
+         ORDER BY gs.b",
     )
     .bind(&bucket)
     .bind(user.0)

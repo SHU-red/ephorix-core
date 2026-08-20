@@ -22,6 +22,13 @@ struct StoredSettings {
 /// Time-range presets for the timeline buttons (label, days).
 const RANGES: &[(i64, &str)] = &[(1, "1D"), (7, "1W"), (30, "1M"), (365, "1Y")];
 
+/// Which bound of the selected session the chart-click picker is writing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PickField {
+    Start,
+    End,
+}
+
 #[derive(Clone)]
 struct LogEntry {
     id: u64,
@@ -223,6 +230,10 @@ pub fn App() -> impl IntoView {
     let reset_zoom = create_rw_signal(0u32);
     let (selected_id, set_selected_id) = create_signal(None::<String>);
     let selected_session = create_rw_signal(None::<AgogeSession>);
+    // Graphical start/end picking for the details panel: which bound a chart
+    // click should write (None = plain click = create open session).
+    let (pick_mode, set_pick_mode) = create_signal(false);
+    let (pick_field, set_pick_field) = create_signal(None::<PickField>);
     let chart_id = create_rw_signal(0u32);
     let (nutrition, set_nutrition) = create_signal(Vec::<NutritionEvent>::new());
     let (sleep, set_sleep) = create_signal(Vec::<SleepDay>::new());
@@ -433,13 +444,46 @@ pub fn App() -> impl IntoView {
 
     // -- Timeline marker interactions ---------------------------------------
 
-    // Chart is ready: remember its bridge id so the session strip can zoom.
+    // Cancel graphical time picking (after a pick lands or the selection
+    // moves on).
+    let end_pick = move || {
+        set_pick_field.set(None);
+        set_pick_mode.set(false);
+    };
+
+    // Chart is ready: remember its bridge id.
     let handle_chart_ready = move |id: u32| {
         chart_id.set(id);
     };
 
-    // Clean left-click on empty plot area -> create an open session at that ts.
+    // Clean left-click on empty plot area: in pick mode it plants the picked
+    // start/end on the selected session; otherwise it creates an open session
+    // at that ts.
     let handle_chart_click = move |ts: f64| {
+        if let Some(field) = pick_field.get() {
+            let Some(s) = selected_session.get() else {
+                end_pick();
+                return;
+            };
+            let base = base.get();
+            let token = token.get();
+            let body = match field {
+                PickField::Start => json!({ "startTime": iso_from_ms(ts) }),
+                PickField::End => json!({ "endTime": iso_from_ms(ts) }),
+            };
+            let id = s.id.clone();
+            end_pick();
+            spawn_local(async move {
+                match patch_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}"), &body).await {
+                    Ok(_) => {
+                        selected_session.set(None);
+                        refresh();
+                    }
+                    Err(e) => set_error.set(Some(e)),
+                }
+            });
+            return;
+        }
         let Some(type_id) = selected_type.get() else {
             set_error.set(Some("select a type first".to_string()));
             return;
@@ -459,43 +503,23 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    // Click on a session bar -> select it for inline editing.
+    // Click on a session bar or chip -> open the details panel for it.
     let handle_session_click = move |sid: String| {
+        if selected_session.get().map(|s| s.id) != Some(sid.clone()) {
+            end_pick();
+        }
         let found = sessions.get().into_iter().find(|s| s.id == sid);
         selected_session.set(found);
     };
 
-    // Session strip chip -> zoom the chart to that session.
-    let zoom_to_session = move |s: AgogeSession| {
-        let id = chart_id.get();
-        if id == 0 {
-            return;
-        }
-        let Some(start) = ms_from_iso(&s.start_time) else { return };
-        let end = s.end_time.as_deref().and_then(ms_from_iso).unwrap_or_else(js_sys::Date::now);
-        crate::timeline::ephorix_zoom_to(id, start, end, 0.0, 0.0, "x");
-    };
-
-    let save_selected_session = move |(id, type_id, start, end): (String, String, String, String)| {
-        let Some(start_ms) = datetime_local_to_ms(&start) else {
-            set_error.set(Some("invalid start time".to_string()));
-            return;
-        };
-        let end_ms = datetime_local_to_ms(&end);
+    // Type change from the details panel: PATCH just the typeId.
+    let save_session_type = move |id: String, type_id: String| {
         let tid: Option<String> = if type_id.is_empty() { None } else { Some(type_id) };
-        let body = json!({
-            "typeId": tid,
-            "startTime": iso_from_ms(start_ms),
-            "endTime": end_ms.map(iso_from_ms),
-        });
         let base = base.get();
         let token = token.get();
         spawn_local(async move {
-            match patch_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}"), &body).await {
-                Ok(_) => {
-                    selected_session.set(None);
-                    refresh();
-                }
+            match patch_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}"), &json!({ "typeId": tid })).await {
+                Ok(_) => refresh(),
                 Err(e) => set_error.set(Some(e)),
             }
         });
@@ -509,6 +533,7 @@ pub fn App() -> impl IntoView {
             match patch_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}"), &json!({ "endTime": end })).await {
                 Ok(_) => {
                     selected_session.set(None);
+                    end_pick();
                     refresh();
                 }
                 Err(e) => set_error.set(Some(e)),
@@ -518,7 +543,47 @@ pub fn App() -> impl IntoView {
 
     let delete_selected_session = move |id: String| {
         selected_session.set(None);
+        end_pick();
         delete_session(id);
+    };
+
+    // Toggle graphical picking of one bound; a second click on the same
+    // button cancels the pick.
+    let toggle_pick = move |field: PickField| {
+        if pick_field.get() == Some(field) {
+            set_pick_field.set(None);
+            set_pick_mode.set(false);
+        } else {
+            set_pick_field.set(Some(field));
+            set_pick_mode.set(true);
+        }
+    };
+
+    // "DURATION" override from the details panel: end = start + HH:MM.
+    let apply_duration = move |id: String, duration: String| {
+        let Some(s) = sessions.get().into_iter().find(|s| s.id == id) else {
+            return;
+        };
+        let Some(start_ms) = ms_from_iso(&s.start_time) else {
+            set_error.set(Some("session has no start time".to_string()));
+            return;
+        };
+        let Some(secs) = parse_hhmm(&duration) else {
+            set_error.set(Some("duration must be HH:MM".to_string()));
+            return;
+        };
+        let end = iso_from_ms(start_ms + secs as f64 * 1000.0);
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            match patch_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}"), &json!({ "endTime": end })).await {
+                Ok(_) => {
+                    selected_session.set(None);
+                    refresh();
+                }
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
     };
 
 
@@ -750,6 +815,7 @@ pub fn App() -> impl IntoView {
                                 series=series
                                 selection=set_selection
                                 cursor=set_cursor
+                                pick_mode=pick_mode
                                 zoom_mode=zoom_mode
                                 clear_trigger=clear_sel
                                 reset_zoom=reset_zoom
@@ -769,7 +835,7 @@ pub fn App() -> impl IntoView {
                                     });
                                     ss
                                 } key=|s| s.id.clone() let:s>
-                                    <SessionChip session=s types=types on_zoom=Callback::new(move |s| zoom_to_session(s)) />
+                                    <SessionChip session=s types=types on_open=Callback::new(move |s: AgogeSession| handle_session_click(s.id.clone())) />
                                 </For>
                             </div>
                             <div class="timeline-actions">
@@ -798,10 +864,15 @@ pub fn App() -> impl IntoView {
                                     let s = selected_session.get().unwrap();
                                     view! {
                                         <div key=s.id.clone()>
-                                            <SessionEditor
+                                            <SessionDetails
                                                 session=s
+                                                base=base.get_untracked()
+                                                token=token.get_untracked()
                                                 types=types
-                                                on_save=Callback::new(move |t| save_selected_session(t))
+                                                pick_field=pick_field
+                                                on_type=Callback::new(move |t: (String, String)| save_session_type(t.0, t.1))
+                                                on_pick=Callback::new(move |f| toggle_pick(f))
+                                                on_duration=Callback::new(move |d: (String, String)| apply_duration(d.0, d.1))
                                                 on_delete=Callback::new(move |id| delete_selected_session(id))
                                                 on_close=Callback::new(move |id| close_selected_session(id))
                                             />
@@ -1341,44 +1412,29 @@ fn GlyphPicker(value: ReadSignal<String>, set: WriteSignal<String>) -> impl Into
 // Timeline marker interaction helpers + components
 // ---------------------------------------------------------------------------
 
-/// "YYYY-MM-DDTHH:MM" in local time for a datetime-local input, from an ISO string.
-fn iso_to_datetime_local(iso: &str) -> String {
-    let ms = js_sys::Date::parse(iso);
-    if ms.is_nan() {
-        return String::new();
-    }
-    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms));
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}",
-        d.get_full_year() as i32,
-        d.get_month() as i32 + 1,
-        d.get_date() as i32,
-        d.get_hours() as i32,
-        d.get_minutes() as i32
-    )
+/// "H:MM:SS" for a whole-second count, for the session details panel.
+fn hms(total: i64) -> String {
+    format!("{}:{:02}:{:02}", total / 3600, (total % 3600) / 60, total % 60)
 }
 
-/// Parse a datetime-local string (local time) back to epoch ms. Appends
-/// seconds so the string is an unambiguous ES date-time form.
-fn datetime_local_to_ms(s: &str) -> Option<f64> {
-    let t = s.trim();
-    if t.is_empty() {
+/// Parse an "HH:MM" duration (multi-digit hours ok) into whole seconds.
+fn parse_hhmm(s: &str) -> Option<i64> {
+    let (h, m) = s.trim().split_once(':')?;
+    let h: i64 = h.trim().parse().ok()?;
+    let m: i64 = m.trim().parse().ok()?;
+    if h < 0 || m < 0 || m > 59 {
         return None;
     }
-    let v = if t.len() == 16 {
-        js_sys::Date::parse(&format!("{t}:00"))
-    } else {
-        js_sys::Date::parse(t)
-    };
-    if v.is_nan() { None } else { Some(v) }
+    Some(h * 3600 + m * 60)
 }
 
 /// One session strip chip: colored dot + type name + HH:MM start time.
+/// Clicking it opens the session's details panel.
 #[component]
 fn SessionChip(
     session: AgogeSession,
     types: ReadSignal<Vec<AgogeType>>,
-    on_zoom: Callback<AgogeSession>,
+    on_open: Callback<AgogeSession>,
 ) -> impl IntoView {
     let sid = session.type_id.clone();
     let name = {
@@ -1407,7 +1463,7 @@ fn SessionChip(
         .unwrap_or_default();
     let s = session.clone();
     view! {
-        <button class="session-chip" on:click=move |_| on_zoom.call(s.clone())>
+        <button class="session-chip" on:click=move |_| on_open.call(s.clone())>
             <span class="dot" style=move || format!("background:{}", color())></span>
             <span class="chip-name">{move || name()}</span>
             <span class="chip-time">{hhmm}</span>
@@ -1415,41 +1471,156 @@ fn SessionChip(
     }
 }
 
-/// Inline editor for a selected session (type / start / end / actions).
+/// Details-first panel for a selected session: stats up front (loaded from
+/// the stats endpoint on open), then type, graphical start/end picking
+/// (click the chart), a duration override, and the destructive actions.
 #[component]
-fn SessionEditor(
+fn SessionDetails(
     session: AgogeSession,
+    base: String,
+    token: String,
     types: ReadSignal<Vec<AgogeType>>,
-    on_save: Callback<(String, String, String, String)>,
+    pick_field: ReadSignal<Option<PickField>>,
+    on_type: Callback<(String, String)>,
+    on_pick: Callback<PickField>,
+    on_duration: Callback<(String, String)>,
     on_delete: Callback<String>,
     on_close: Callback<String>,
 ) -> impl IntoView {
     let is_active = session.status == "active";
     let id = session.id.clone();
     let (type_id, set_type_id) = create_signal(session.type_id.clone().unwrap_or_default());
-    let (start, set_start) = create_signal(iso_to_datetime_local(&session.start_time));
-    let (end, set_end) = create_signal(session.end_time.as_deref().map(iso_to_datetime_local).unwrap_or_default());
-    let id_save = id.clone();
-    let id_delete = id.clone();
+
+    // Type name + swatch, kept live against the type dictionary.
+    let sid = session.type_id.clone();
+    let name = {
+        let sid = sid.clone();
+        move || {
+            sid.as_ref()
+                .and_then(|tid| types.get().into_iter().find(|t| &t.id == tid))
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| "Undefined".to_string())
+        }
+    };
+    let color = {
+        let sid = sid.clone();
+        move || {
+            sid.as_ref()
+                .and_then(|tid| types.get().into_iter().find(|t| &t.id == tid))
+                .map(|t| t.color_code.clone())
+                .unwrap_or_else(|| "#7B0000".to_string())
+        }
+    };
+
+    // Stats: fetched on open (the panel is keyed by session id, so this
+    // runs once per selection).
+    let (stats, set_stats) = create_signal(None::<SessionStats>);
+    let (stats_error, set_stats_error) = create_signal(None::<String>);
+    let (loading, set_loading) = create_signal(true);
+    let sid_fetch = id.clone();
+    spawn_local(async move {
+        match fetch_session_stats(&base, &token, &sid_fetch).await {
+            Ok(s) => set_stats.set(Some(s)),
+            Err(e) => set_stats_error.set(Some(e)),
+        }
+        set_loading.set(false);
+    });
+
+    let start_label = ms_from_iso(&session.start_time)
+        .map(fmt_time)
+        .unwrap_or_else(|| session.start_time.clone());
+    let end_label = session
+        .end_time
+        .as_deref()
+        .and_then(ms_from_iso)
+        .map(fmt_time)
+        .unwrap_or_else(|| "OPEN".to_string());
+
+    // DURATION override input ("HH:MM"); APPLY computes end = start + duration.
+    let (duration, set_duration) = create_signal(String::new());
+
+    let id_type = id.clone();
+    let id_dur = id.clone();
+    let id_del = id.clone();
     let id_close = id.clone();
     view! {
         <div class="session-editor">
+            <div style="flex:1 1 100%; display:flex; align-items:center; gap:10px;">
+                <span class="dot" style=move || format!("background:{}", color())></span>
+                <span class="row-name">{move || name()}</span>
+                <span class="muted">{format!("START {start_label} · END {end_label}")}</span>
+                <Show when=move || pick_field.get().is_some() fallback=|| ()>
+                    <span class="muted">"NOW CLICK THE CHART AT THE TARGET TIME"</span>
+                </Show>
+            </div>
+            <Show when=move || loading.get() fallback=|| ()>
+                <div class="muted">"LOADING STATS…"</div>
+            </Show>
+            <Show when=move || stats_error.get().is_some() fallback=|| ()>
+                {move || format!("STATS UNAVAILABLE — {}", stats_error.get().unwrap_or_default())}
+            </Show>
+            <Show when=move || stats.get().is_some() fallback=|| ()>
+                {move || {
+                    let st = stats.get().unwrap();
+                    view! {
+                        <div class="kpi" style="flex:1 1 460px; min-width:0;">
+                            <div class="kpi-chip">
+                                <span class="kpi-label">"TOTAL"</span>
+                                <div class="kpi-value">{hms(st.duration_sec)}</div>
+                            </div>
+                            <div class="kpi-chip">
+                                <span class="kpi-label">"IN ACTION"</span>
+                                <div class="kpi-value">{hms(st.active_sec)}</div>
+                            </div>
+                            <div class="kpi-chip">
+                                <span class="kpi-label">"PAUSE"</span>
+                                <div class="kpi-value">{hms(st.pause_sec)}</div>
+                            </div>
+                            <div class="kpi-chip">
+                                <span class="kpi-label">"REPS"</span>
+                                <div class="kpi-value">{format!("{}", st.reps)}</div>
+                            </div>
+                            <div class="kpi-chip">
+                                <span class="kpi-label">"KCAL"</span>
+                                <div class="kpi-value">{format!("{:.0}", st.calories)}</div>
+                            </div>
+                            <div class="kpi-chip">
+                                <span class="kpi-label">"AVG HR"</span>
+                                <div class="kpi-value">{format!("{:.0}", st.avg_hr)}<span class="unit">"BPM"</span></div>
+                            </div>
+                            <div class="kpi-chip">
+                                <span class="kpi-label">"PEAK HR"</span>
+                                <div class="kpi-value">{format!("{}", st.peak_hr)}<span class="unit">"BPM"</span></div>
+                            </div>
+                        </div>
+                    }
+                }}
+            </Show>
             <label class="ctl">"TYPE"
-                <select prop:value=type_id on:change=move |ev| set_type_id.set(event_target_value(&ev))>
+                <select prop:value=type_id on:change=move |ev| {
+                    let v = event_target_value(&ev);
+                    set_type_id.set(v.clone());
+                    on_type.call((id_type.clone(), v));
+                }>
                     <option value="">"UNDEFINED"</option>
                     <For each=move || types.get() key=|t| t.id.clone() let:t>
                         <option value=t.id.clone()>{t.name.clone()}</option>
                     </For>
                 </select>
             </label>
-            <label class="ctl">"START"
-                <input type="datetime-local" prop:value=start on:input=move |ev| set_start.set(event_target_value(&ev)) />
+            <button class="btn" class:on=move || pick_field.get() == Some(PickField::Start)
+                    on:click=move |_| on_pick.call(PickField::Start)>
+                {move || if pick_field.get() == Some(PickField::Start) { "PICKING START…" } else { "SET START" }}
+            </button>
+            <button class="btn" class:on=move || pick_field.get() == Some(PickField::End)
+                    on:click=move |_| on_pick.call(PickField::End)>
+                {move || if pick_field.get() == Some(PickField::End) { "PICKING END…" } else { "SET END" }}
+            </button>
+            <label class="ctl">"DURATION"
+                <input placeholder="HH:MM" prop:value=duration on:input=move |ev| set_duration.set(event_target_value(&ev)) />
             </label>
-            <label class="ctl">"END"
-                <input type="datetime-local" prop:value=end on:input=move |ev| set_end.set(event_target_value(&ev)) />
-            </label>
-            <button class="btn" on:click=move |_| on_save.call((id_save.clone(), type_id.get(), start.get(), end.get()))>"SAVE"</button>
-            <button class="btn danger" on:click=move |_| on_delete.call(id_delete.clone())>"DELETE"</button>
+            <button class="btn" on:click=move |_| on_duration.call((id_dur.clone(), duration.get()))>"APPLY"</button>
+            <button class="btn danger" on:click=move |_| on_delete.call(id_del.clone())>"DELETE"</button>
             {is_active.then(|| view! {
                 <button class="btn" on:click=move |_| on_close.call(id_close.clone())>"CLOSE NOW"</button>
             })}
