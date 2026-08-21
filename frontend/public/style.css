@@ -93,10 +93,10 @@ h1, h2, h3 {
 
 .brand-row { display: flex; align-items: center; }
 
-/* Spartan banner (opaque full-bleed): top-right of the header, same height as
-   the EPHORIX wordmark. No drop-shadow — the image is fully opaque (its black
-   background matches --bg), so a shadow would trace a rectangular halo. */
-.brand-helmet {
+/* Spartan lambda emblem (inline SVG): top-right of the header, same height as
+   the EPHORIX wordmark. The SVG is transparent, so the pulsing ember glow in
+   the lambda-glow animation traces the lambda + flames, not a rectangle. */
+.brand-lambda {
   height: 96px;
   width: auto;
   align-self: flex-start;
@@ -629,7 +629,7 @@ footer {
   .brand .sub {
     white-space: normal;
   }
-  .brand-helmet {
+  .brand-lambda {
     height: 44px;
   }
   /* Single swipeable row: all 11 tabs reachable by scrolling. */
@@ -649,9 +649,9 @@ footer {
   }
 }
 
-/* The banner is 2.4:1 — below 480px it would crowd the wordmark. */
+/* Below 480px the emblem would crowd the wordmark. */
 @media (max-width: 480px) {
-  .brand-helmet {
+  .brand-lambda {
     display: none;
   }
 }
@@ -1002,4 +1002,42 @@ html, body { overflow-x: hidden; }
     bottom: 70px;
     max-height: 74vh;
   }
+}
+
+/* ---------------------------------------------------------------------------
+   Brand lambda emblem (header): pulsing ember glow, flickering flames, and
+   rising embers on the inline SVG in app.rs. Pure CSS keyframes — no JS. */
+.brand-lambda {
+  animation: lambda-glow 3.2s ease-in-out infinite;
+}
+
+@keyframes lambda-glow {
+  0%, 100% { filter: drop-shadow(0 0 10px rgba(229, 57, 53, 0.35)); }
+  50%      { filter: drop-shadow(0 0 26px rgba(229, 57, 53, 0.65)); }
+}
+
+.brand-flame {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  animation: lambda-flicker 1.1s ease-in-out infinite;
+}
+
+@keyframes lambda-flicker {
+  0%, 100% { transform: scaleY(1) scaleX(1); opacity: 1; }
+  50%      { transform: scaleY(1.14) scaleX(0.92); opacity: 0.82; }
+}
+
+.brand-ember {
+  animation: lambda-ember-rise 2.4s linear infinite;
+  animation-fill-mode: both; /* keep embers invisible during their delay gap */
+}
+
+@keyframes lambda-ember-rise {
+  0%   { transform: translate(0, 0); opacity: 0; }
+  12%  { opacity: 1; }
+  100% { transform: translate(3px, -46px); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-lambda, .brand-flame, .brand-ember { animation: none; }
 }

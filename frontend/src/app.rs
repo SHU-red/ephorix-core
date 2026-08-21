@@ -1489,7 +1489,40 @@ pub fn App() -> impl IntoView {
                     </div>
                     <span class="sub">"ΑΓΩΓΗ · TRAINING COMMAND"</span>
                 </div>
-                <img class="brand-helmet" src="/assets/spartan_banner.png" alt="Spartan banner" />
+                <svg class="brand-lambda" viewBox="0 0 120 100" role="img" aria-label="Spartan lambda">
+                    <defs>
+                        <linearGradient id="flame-grad" x1="0" y1="1" x2="0" y2="0">
+                            <stop offset="0%" stop-color="#7b0000" />
+                            <stop offset="38%" stop-color="#e53935" />
+                            <stop offset="72%" stop-color="#ff7043" />
+                            <stop offset="100%" stop-color="#ffd54f" />
+                        </linearGradient>
+                        <filter id="glow-blur" x="-80%" y="-80%" width="260%" height="260%">
+                            <feGaussianBlur stdDeviation="4" />
+                        </filter>
+                    </defs>
+                    <ellipse cx="60" cy="90" rx="30" ry="5" fill="rgba(229,57,53,0.35)" filter="url(#glow-blur)" />
+                    <path d="M 22 86 L 60 12 L 98 86" fill="none" stroke="#e53935" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" />
+                    <path d="M 29.7 80.9 L 60 21.2 L 90.3 80.9" fill="none" stroke="#ff5252" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" />
+                    <g class="brand-flame" style="animation-delay: 0s">
+                        <path d="M 60 46 C 63.5 54 74 68 74 78 C 74 86 67.7 90.5 60 90.5 C 52.3 90.5 46 86 46 78 C 46 68 56.5 54 60 46 Z" fill="url(#flame-grad)" />
+                        <path d="M 60 46 C 63.5 54 74 68 74 78 C 74 86 67.7 90.5 60 90.5 C 52.3 90.5 46 86 46 78 C 46 68 56.5 54 60 46 Z" transform="translate(60 84) scale(0.4) translate(-60 -84)" fill="#ffd54f" opacity="0.9" />
+                    </g>
+                    <g class="brand-flame" style="animation-delay: 0.35s">
+                        <path d="M 41 62 C 43.5 68 51 78 51 84 C 51 90 46.6 92 41 92 C 35.4 92 31 90 31 84 C 31 78 38.5 68 41 62 Z" fill="url(#flame-grad)" />
+                        <path d="M 41 62 C 43.5 68 51 78 51 84 C 51 90 46.6 92 41 92 C 35.4 92 31 90 31 84 C 31 78 38.5 68 41 62 Z" transform="translate(41 85) scale(0.4) translate(-41 -85)" fill="#ffd54f" opacity="0.9" />
+                    </g>
+                    <g class="brand-flame" style="animation-delay: 0.7s">
+                        <path d="M 79 60 C 81.5 66 89 76 89 82 C 89 88 84.6 90 79 90 C 73.4 90 69 88 69 82 C 69 76 76.5 66 79 60 Z" fill="url(#flame-grad)" />
+                        <path d="M 79 60 C 81.5 66 89 76 89 82 C 89 88 84.6 90 79 90 C 73.4 90 69 88 69 82 C 69 76 76.5 66 79 60 Z" transform="translate(79 84) scale(0.4) translate(-79 -84)" fill="#ffd54f" opacity="0.9" />
+                    </g>
+                    <circle class="brand-ember" cx="50" cy="86" r="2" fill="#ffd54f" style="animation-delay: 0s" />
+                    <circle class="brand-ember" cx="68" cy="84" r="1.8" fill="#ff7043" style="animation-delay: 0.6s" />
+                    <circle class="brand-ember" cx="58" cy="82" r="2.2" fill="#ff5252" style="animation-delay: 1.2s" />
+                    <circle class="brand-ember" cx="44" cy="80" r="1.6" fill="#ffd54f" style="animation-delay: 1.8s" />
+                    <circle class="brand-ember" cx="74" cy="78" r="1.8" fill="#ff7043" style="animation-delay: 2.1s" />
+                    <circle class="brand-ember" cx="63" cy="87" r="1.5" fill="#ffd54f" style="animation-delay: 2.5s" />
+                </svg>
             </header>
 
             <nav class="tabs">
