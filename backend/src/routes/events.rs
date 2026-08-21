@@ -49,6 +49,29 @@ pub struct MarkerEvent {
     pub source: Option<String>,
     #[serde(default)]
     pub meta: Option<serde_json::Value>,
+    /// Workout summary (Stop only): flattened onto the request body, so the
+    /// fields sit at the top level next to `sessionId`.
+    #[serde(flatten)]
+    pub summary: StopSummary,
+}
+
+/// Workout summary payload attached to a Stop marker. The watch computes
+/// these from its session ring + accelerometer; every field is optional.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopSummary {
+    #[serde(default)]
+    pub duration_sec: Option<i32>,
+    #[serde(default)]
+    pub workout_kcal: Option<f32>,
+    #[serde(default)]
+    pub avg_hr: Option<i32>,
+    #[serde(default)]
+    pub reps: Option<i32>,
+    #[serde(default)]
+    pub movement_intensity: Option<f32>,
+    #[serde(default)]
+    pub distance_m: Option<f32>,
 }
 
 pub async fn ingest_marker(
@@ -64,6 +87,7 @@ pub async fn ingest_marker(
         session_id,
         source,
         meta,
+        summary,
     } = ev;
     let occurred_at = occurred_at.unwrap_or_else(Utc::now);
     let source = source.unwrap_or_else(|| "watch".to_string());
@@ -74,7 +98,7 @@ pub async fn ingest_marker(
             (s, "start")
         }
         MarkerKind::Stop => {
-            let s = stop_session(&pool, user.0, session_id, occurred_at).await?;
+            let s = stop_session(&pool, user.0, session_id, occurred_at, &summary).await?;
             (s, "stop")
         }
         MarkerKind::Pause | MarkerKind::Resume => {
@@ -111,23 +135,37 @@ async fn start_session(
     Ok(session)
 }
 
-/// Closes the given session (if owned), else the user's latest open session.
+/// Closes the given session (if owned), else the user's latest open session,
+/// and writes the workout summary (if any) onto the closed row.
 async fn stop_session(
     pool: &PgPool,
     user_id: Uuid,
     session_id: Option<Uuid>,
     occurred_at: DateTime<Utc>,
+    summary: &StopSummary,
 ) -> ApiResult<AgogeSession> {
     let session = if let Some(sid) = session_id {
         sqlx::query_as::<_, AgogeSession>(
             "UPDATE agoge_sessions
-             SET end_time = $3, status = 'closed', updated_at = now()
+             SET end_time = $3, status = 'closed', updated_at = now(),
+                 duration_sec = COALESCE($4, duration_sec),
+                 workout_kcal = COALESCE($5, workout_kcal),
+                 avg_hr = COALESCE($6, avg_hr),
+                 reps = COALESCE($7, reps),
+                 movement_intensity = COALESCE($8, movement_intensity),
+                 distance_m = COALESCE($9, distance_m)
              WHERE id = $1 AND user_id = $2 AND status = 'active'
              RETURNING *",
         )
         .bind(sid)
         .bind(user_id)
         .bind(occurred_at)
+        .bind(summary.duration_sec)
+        .bind(summary.workout_kcal)
+        .bind(summary.avg_hr)
+        .bind(summary.reps)
+        .bind(summary.movement_intensity)
+        .bind(summary.distance_m)
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| {
@@ -136,7 +174,13 @@ async fn stop_session(
     } else {
         sqlx::query_as::<_, AgogeSession>(
             "UPDATE agoge_sessions
-             SET end_time = $2, status = 'closed', updated_at = now()
+             SET end_time = $2, status = 'closed', updated_at = now(),
+                 duration_sec = COALESCE($3, duration_sec),
+                 workout_kcal = COALESCE($4, workout_kcal),
+                 avg_hr = COALESCE($5, avg_hr),
+                 reps = COALESCE($6, reps),
+                 movement_intensity = COALESCE($7, movement_intensity),
+                 distance_m = COALESCE($8, distance_m)
              WHERE id = (SELECT id FROM agoge_sessions
                          WHERE user_id = $1 AND status = 'active'
                          ORDER BY start_time DESC LIMIT 1)
@@ -144,6 +188,12 @@ async fn stop_session(
         )
         .bind(user_id)
         .bind(occurred_at)
+        .bind(summary.duration_sec)
+        .bind(summary.workout_kcal)
+        .bind(summary.avg_hr)
+        .bind(summary.reps)
+        .bind(summary.movement_intensity)
+        .bind(summary.distance_m)
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| ApiError::NotFound("no open agoge session".to_string()))?

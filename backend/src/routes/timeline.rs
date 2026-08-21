@@ -129,8 +129,8 @@ pub async fn get_timeline(
     let sleep: Vec<SleepDay> = sqlx::query_as(
         "SELECT
             (EXTRACT(EPOCH FROM date_trunc('day', ts)) * 1000)::float8 AS ts,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'sleep_seconds'), 0)::float8 AS sleep_seconds,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'restful_sleep_seconds'), 0)::float8 AS restful_seconds
+            COALESCE(MAX(value) FILTER (WHERE metric = 'sleep_seconds'), 0)::float8 AS sleep_seconds,
+            COALESCE(MAX(value) FILTER (WHERE metric = 'restful_sleep_seconds'), 0)::float8 AS restful_seconds
          FROM measurements
          WHERE user_id = $1 AND ts >= $2 AND ts < $3
            AND metric IN ('sleep_seconds', 'restful_sleep_seconds')

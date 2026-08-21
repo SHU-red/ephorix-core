@@ -51,6 +51,7 @@ pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
             "/api/v1/health/batch",
             post(health::ingest_batch),
         )
+        .route("/api/v1/health/days", post(health::ingest_days))
         .route("/api/v1/events/marker", post(events::ingest_marker))
         .route("/api/v1/events/markers", get(events::list_markers))
         .route(

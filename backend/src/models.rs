@@ -29,6 +29,13 @@ pub struct AgogeSession {
     pub end_time: Option<DateTime<Utc>>,
     /// 'active' (open) | 'closed'
     pub status: String,
+    /// Workout summary written by the Stop marker (all NULL until provided).
+    pub duration_sec: Option<i32>,
+    pub workout_kcal: Option<f32>,
+    pub avg_hr: Option<i32>,
+    pub reps: Option<i32>,
+    pub movement_intensity: Option<f32>,
+    pub distance_m: Option<f32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

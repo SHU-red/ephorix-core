@@ -406,7 +406,9 @@ pub async fn accept_detection(
     let session: AgogeSession = sqlx::query_as(
         "INSERT INTO agoge_sessions (user_id, type_id, start_time, end_time, status)
          VALUES ($1, $2, $3, $4, 'closed')
-         RETURNING id, user_id, type_id, start_time, end_time, status, created_at, updated_at",
+         RETURNING id, user_id, type_id, start_time, end_time, status,
+                   duration_sec, workout_kcal, avg_hr, reps,
+                   movement_intensity, distance_m, created_at, updated_at",
     )
     .bind(user.0)
     .bind(proposed_type_id)

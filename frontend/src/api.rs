@@ -27,6 +27,21 @@ pub struct AgogeSession {
     pub start_time: String,
     pub end_time: Option<String>,
     pub status: String,
+    // Watch stop summary (StopSummaryJson -> agoge_sessions columns, all
+    // NULL until the watch reports a workout end). SessionDetails shows
+    // these directly; /stats keeps computing live from measurements.
+    #[serde(default)]
+    pub duration_sec: Option<i64>,
+    #[serde(default)]
+    pub workout_kcal: Option<f64>,
+    #[serde(default)]
+    pub avg_hr: Option<i64>,
+    #[serde(default)]
+    pub reps: Option<i64>,
+    #[serde(default)]
+    pub movement_intensity: Option<f64>,
+    #[serde(default)]
+    pub distance_m: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

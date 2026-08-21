@@ -12,7 +12,7 @@ use axum::{
     extract::{Extension, State},
     Json,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
@@ -20,7 +20,7 @@ use sqlx::PgPool;
 use crate::{
     auth::AuthUser,
     error::{ApiError, ApiResult},
-    normalize::{insert_measurements, normalize_pebble},
+    normalize::{insert_measurements, normalize_pebble, Measurement},
 };
 
 pub const MAX_BATCH_SAMPLES: usize = 1000;
@@ -137,4 +137,165 @@ pub async fn ingest_batch(
         "inserted": raw_inserted + normalized_count,
         "normalized": normalized_count,
     })))
+}
+
+/// Maximum calendar days accepted in one day-history payload (watch backfills
+/// up to 7; the cap guards the endpoint against abuse).
+pub const MAX_DAYS: usize = 31;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayValue {
+    /// Calendar day, `YYYY-MM-DD` (UTC). The watch sends `"d"` (alias);
+    /// `"date"` is the canonical wire name for API clients.
+    #[serde(alias = "d")]
+    pub date: String,
+    #[serde(default)]
+    pub steps: Option<i32>,
+    #[serde(default)]
+    pub active_kcal: Option<f32>,
+    #[serde(default)]
+    pub sleep_seconds: Option<i32>,
+    #[serde(default)]
+    pub restful_sleep_seconds: Option<i32>,
+    #[serde(default)]
+    pub distance_m: Option<f32>,
+    #[serde(default)]
+    pub active_seconds: Option<i32>,
+    #[serde(default)]
+    pub resting_kcal: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayBatch {
+    /// Watch identifier (Pebble MAC / UUID) — informational, for fleet
+    /// debugging. Auth still comes from the token header.
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub batched_at: Option<DateTime<Utc>>,
+    pub days: Vec<DayValue>,
+}
+
+/// Daily aggregates (Pebble Health historical backfill). One row per
+/// (day, metric) at the day's UTC midday anchor, normalized through the same
+/// Pebble adapter as `ingest_batch` — identical canonical metric names, units
+/// and zero/negative filtering — so day aggregates and raw samples share the
+/// `measurements` vocabulary. Idempotent: re-posting the same day re-inserts
+/// nothing (unique `(user_id, metric, ts)`, see migration 0010).
+pub async fn ingest_days(
+    State(pool): State<PgPool>,
+    Extension(user): Extension<AuthUser>,
+    Json(batch): Json<DayBatch>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if batch.days.is_empty() {
+        return Err(ApiError::BadRequest("days must not be empty".to_string()));
+    }
+    if batch.days.len() > MAX_DAYS {
+        return Err(ApiError::BadRequest(format!(
+            "days exceeds max of {MAX_DAYS}"
+        )));
+    }
+
+    tracing::debug!(
+        "ingesting {} day aggregates from device {:?}, batched_at {:?}",
+        batch.days.len(),
+        batch.device_id,
+        batch.batched_at
+    );
+
+    let mut rows: Vec<Measurement> = Vec::new();
+    for d in &batch.days {
+        let day = parse_day(&d.date)?;
+        // Non-finite values are rejected outright; negatives follow the
+        // shared adapter's filter (omitted) — day aggregates must stay in
+        // the same shape the raw-sample path would have produced.
+        for (name, v) in [
+            ("activeKcal", d.active_kcal),
+            ("distanceM", d.distance_m),
+            ("restingKcal", d.resting_kcal),
+        ] {
+            if v.is_some_and(|v| !v.is_finite()) {
+                return Err(ApiError::BadRequest(format!(
+                    "{name} must be finite (day {})",
+                    d.date
+                )));
+            }
+        }
+        let ts = day
+            .and_hms_opt(12, 0, 0)
+            .expect("midday anchor is always a valid time")
+            .and_utc();
+        rows.extend(normalize_pebble(
+            ts,
+            None, // no heart rate in day aggregates
+            d.steps,
+            d.active_kcal,
+            d.sleep_seconds,
+            d.restful_sleep_seconds,
+            d.distance_m,
+            d.active_seconds,
+            d.resting_kcal,
+            None, // no movement intensity in day aggregates
+            None, // no reps in day aggregates
+        ));
+    }
+
+    let inserted = insert_measurements(&pool, user.0, "pebble", batch.device_id.as_deref(), &rows)
+        .await?;
+
+    Ok(Json(json!({ "inserted": inserted })))
+}
+
+/// Strict `YYYY-MM-DD` (zero-padded, valid calendar date); the round-trip
+/// rejects sloppy forms chrono would otherwise accept (`2026-1-5`).
+fn parse_day(raw: &str) -> ApiResult<NaiveDate> {
+    let day = NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(|_| {
+        ApiError::BadRequest(format!("date must be YYYY-MM-DD, got {raw:?}"))
+    })?;
+    if day.format("%Y-%m-%d").to_string() != raw {
+        return Err(ApiError::BadRequest(format!(
+            "date must be YYYY-MM-DD, got {raw:?}"
+        )));
+    }
+    Ok(day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn day_batch_accepts_watch_d_key_and_api_date_key() {
+        // Watch serializes day entries with "d"; API clients use "date".
+        let watch: DayBatch = serde_json::from_value(json!({
+            "days": [{
+                "d": "2026-08-20",
+                "steps": 12000,
+                "activeKcal": 410.5,
+            }]
+        }))
+        .unwrap();
+        assert_eq!(watch.days[0].date, "2026-08-20");
+        assert_eq!(watch.days[0].steps, Some(12000));
+        assert_eq!(watch.days[0].active_kcal, Some(410.5));
+
+        let api: DayBatch = serde_json::from_value(json!({
+            "days": [{
+                "date": "2026-08-20",
+                "steps": 9000,
+            }]
+        }))
+        .unwrap();
+        assert_eq!(api.days[0].date, "2026-08-20");
+        assert_eq!(api.days[0].steps, Some(9000));
+    }
+
+    #[test]
+    fn parse_day_keeps_strict_round_trip() {
+        assert!(parse_day("2026-08-20").is_ok());
+        assert!(parse_day("2026-8-20").is_err()); // not zero-padded
+        assert!(parse_day("2026-08-32").is_err()); // invalid calendar date
+    }
 }

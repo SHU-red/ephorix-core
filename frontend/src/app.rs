@@ -382,6 +382,158 @@ fn meal_label(m: &NutritionMeal) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Pebble day-history overlay: daily aggregates (noon-UTC anchors) land in the
+// normalized `measurements` store, while the timeline buckets only read
+// `raw_health_data`. Merge the day rows in for days with no raw coverage so
+// backfilled days (watch off / historical) appear in the steps/kcal charts.
+// ---------------------------------------------------------------------------
+
+/// One row from `GET /api/v1/measurements` (long-form normalized store).
+#[derive(Debug, Clone, Deserialize)]
+struct RawMeasurementRow {
+    ts: f64,
+    metric: String,
+    value: f64,
+}
+
+/// Seconds in a server bucket string ("13 minutes", "1 hour", "1 day").
+fn bucket_secs(s: &str) -> Option<f64> {
+    let mut parts = s.split_whitespace();
+    let n: f64 = parts.next()?.parse().ok()?;
+    let mult = match parts.next()?.to_ascii_lowercase().as_str() {
+        "second" | "seconds" | "sec" | "s" => 1.0,
+        "minute" | "minutes" | "min" | "m" => 60.0,
+        "hour" | "hours" | "h" => 3600.0,
+        "day" | "days" | "d" => 86400.0,
+        _ => return None,
+    };
+    Some(n * mult)
+}
+
+/// Day-aggregate rows (steps / active_calories) from the normalized store —
+/// the Pebble day-history backfill, plus any other source's daily totals.
+async fn fetch_day_aggregates(
+    base: &str,
+    token: &str,
+    from_ms: f64,
+    to_ms: f64,
+) -> Result<Vec<RawMeasurementRow>, String> {
+    let mut out = Vec::new();
+    for metric in ["steps", "active_calories"] {
+        let v = Request::get(&format!("{base}/api/v1/measurements"))
+            .header("X-EphoriX-Token", token)
+            .query([
+                ("from", iso_from_ms(from_ms).as_str()),
+                ("to", iso_from_ms(to_ms).as_str()),
+                ("metric", metric),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?
+            .json::<Value>()
+            .await
+            .map_err(|e| format!("invalid json: {e}"))?;
+        if let Ok(rows) = serde_json::from_value::<Vec<RawMeasurementRow>>(v["points"].clone()) {
+            out.extend(rows);
+        }
+    }
+    Ok(out)
+}
+
+/// Overlay daily totals onto timeline buckets that have NO raw_health_data
+/// coverage at all. A day row (noon-UTC anchor, full-day value) is spread
+/// proportionally over the buckets overlapping that UTC day, so backfilled
+/// days render as a steady rate line instead of a noon spike. Days with any
+/// raw data (today's live minutes, partial coverage) are left untouched —
+/// merging the full-day total there would double-count. Coverage is decided
+/// against the pristine buckets first, then all writes apply, so a bucket
+/// straddling midnight never looks "covered" because of an earlier merge.
+fn merge_day_aggregates(points: &mut Vec<TimelinePoint>, rows: &[RawMeasurementRow], bucket_secs: f64) {
+    const DAY_MS: f64 = 86_400_000.0;
+    const NOON_MS: f64 = 43_200_000.0;
+    if points.is_empty() || rows.is_empty() || bucket_secs <= 0.0 {
+        return;
+    }
+    let bucket_ms = bucket_secs * 1000.0;
+    let domain_start = points[0].ts;
+    let domain_end = points[points.len() - 1].ts + bucket_ms;
+    let day_start_of = |ts: f64| ((ts - NOON_MS) / DAY_MS).floor() * DAY_MS;
+
+    // Pass 1 — decide what to merge, reading the untouched buckets only.
+    struct DayMerge {
+        day_start: f64,
+        ov_start: f64,
+        ov_end: f64,
+        total_ov: f64,
+    }
+    let mut merges: Vec<(usize, DayMerge)> = Vec::new();
+    for (idx, r) in rows.iter().enumerate() {
+        if !(r.value > 0.0) {
+            continue;
+        }
+        // Only noon-anchored day aggregates ("d" rows at 12:00:00 UTC).
+        let day_start = day_start_of(r.ts);
+        if (r.ts - day_start - NOON_MS).abs() > 3_600_000.0 {
+            continue;
+        }
+        let day_end = day_start + DAY_MS;
+        let ov_start = day_start.max(domain_start);
+        let ov_end = day_end.min(domain_end);
+        if ov_end <= ov_start {
+            continue; // day entirely outside the visible range
+        }
+
+        // Skip the day if it has ANY raw coverage: the full-day total would
+        // double-count the raw buckets' own share.
+        let day_has_raw = points.iter().any(|p| {
+            p.ts + bucket_ms > day_start
+                && p.ts < day_end
+                && (p.heart_rate.is_some() || p.steps.unwrap_or(0) > 0 || p.active_calories.unwrap_or(0.0) > 0.0)
+        });
+        if day_has_raw {
+            continue;
+        }
+
+        // Total overlap between the day window (clipped to the visible
+        // range) and the buckets — the divisor for the proportional spread.
+        let total_ov: f64 = points
+            .iter()
+            .map(|p| (p.ts + bucket_ms).min(ov_end) - p.ts.max(ov_start))
+            .filter(|d| *d > 0.0)
+            .sum();
+        if total_ov <= 0.0 {
+            continue;
+        }
+        merges.push((
+            idx,
+            DayMerge {
+                day_start,
+                ov_start,
+                ov_end,
+                total_ov,
+            },
+        ));
+    }
+
+    // Pass 2 — apply the decided merges.
+    for (idx, m) in merges {
+        let r = &rows[idx];
+        for p in points.iter_mut() {
+            let overlap = (p.ts + bucket_ms).min(m.ov_end) - p.ts.max(m.ov_start);
+            if overlap <= 0.0 {
+                continue;
+            }
+            let share = r.value * overlap / m.total_ov;
+            if r.metric == "steps" {
+                p.steps = Some(p.steps.unwrap_or(0) + share.round() as i64);
+            } else if r.metric == "active_calories" {
+                p.active_calories = Some(p.active_calories.unwrap_or(0.0) + share);
+            }
+        }
+    }
+}
+
 pub fn App() -> impl IntoView {
     let (token, set_token) = create_signal("ephorix-dev-1".to_string());
     // Empty = same origin (served behind the web service, /api proxied to
@@ -519,7 +671,28 @@ pub fn App() -> impl IntoView {
 
         spawn_local(async move {
             match fetch_timeline(&base, &token, from_ms, to_ms, &bucket).await {
-                Ok(tt) => {
+                Ok(mut tt) => {
+                    // Pebble day-history backfill: daily aggregates land in
+                    // `measurements` at noon-UTC anchors, while the timeline
+                    // buckets only read raw_health_data — overlay the day rows
+                    // for days with no raw coverage (watch off / historical).
+                    if days >= 2 {
+                        match fetch_day_aggregates(&base, &token, from_ms, to_ms).await {
+                            Ok(rows) => {
+                                let b_secs = bucket_secs(&tt.bucket).unwrap_or_else(|| {
+                                    if tt.points.len() >= 2 {
+                                        (tt.points[tt.points.len() - 1].ts - tt.points[0].ts)
+                                            / (tt.points.len() - 1) as f64
+                                            / 1000.0
+                                    } else {
+                                        3600.0
+                                    }
+                                });
+                                merge_day_aggregates(&mut tt.points, &rows, b_secs);
+                            }
+                            Err(_) => {}
+                        }
+                    }
                     set_points.set(tt.points);
                     set_sessions.set(tt.sessions);
                     set_nutrition.set(tt.nutrition);
@@ -3120,6 +3293,12 @@ fn SessionDetails(
 ) -> impl IntoView {
     let is_active = session.status == "active";
     let id = session.id.clone();
+    // Watch stop summary (StopSummaryJson -> agoge_sessions, camelCase on the
+    // session object): intensity + distance have no live-computed equivalent
+    // in /stats, so they render from the session itself when the watch
+    // reported them (None = "—").
+    let summary_intensity = session.movement_intensity;
+    let summary_distance = session.distance_m;
     // Shared read handles so the per-row closures below can clone the
     // connection strings without moving them out of a multi-call Fn scope.
     let (base_r, _base_w) = create_signal(base.clone());
@@ -3326,6 +3505,18 @@ fn SessionDetails(
                         </div>
                     }
                 }}
+            </Show>
+            <Show when=move || summary_intensity.is_some() || summary_distance.is_some() fallback=|| ()>
+                <div class="kpi" style="flex:1 1 460px; min-width:0;">
+                    <div class="kpi-chip">
+                        <span class="kpi-label">"INTENSITY"</span>
+                        <div class="kpi-value">{move || summary_intensity.map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".to_string())}</div>
+                    </div>
+                    <div class="kpi-chip">
+                        <span class="kpi-label">"DISTANCE"</span>
+                        <div class="kpi-value">{move || summary_distance.map(|v| format!("{v:.0} m")).unwrap_or_else(|| "—".to_string())}</div>
+                    </div>
+                </div>
             </Show>
             <div style="flex:1 1 100%; display:flex; flex-direction:column; gap:8px; margin-top:14px; padding-top:14px; border-top:1px solid var(--line);">
                 <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
