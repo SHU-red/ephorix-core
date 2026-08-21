@@ -5,6 +5,8 @@
 //!     sessions, and the user accepts (→ Agoge session) or rejects them.
 //! All are source-agnostic — they only read canonical metric names.
 
+use std::collections::HashMap;
+
 use axum::{
     extract::{Extension, Path, Query, State},
     Json,
@@ -15,7 +17,12 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{auth::AuthUser, error::{ApiError, ApiResult}, models::AgogeSession};
+use crate::{
+    auth::AuthUser,
+    error::{ApiError, ApiResult},
+    models::AgogeSession,
+    normalize::{METRIC_HRV, METRIC_RESTING_HR},
+};
 
 // --- body battery -----------------------------------------------------------
 // Full = 300 (the 300 Spartans). Recharge from sleep, discharge from activity
@@ -164,7 +171,20 @@ pub async fn body_battery_series(
         return Err(ApiError::BadRequest("range exceeds 366 days".to_string()));
     }
     let bucket = q.bucket.unwrap_or_else(|| "1 hour".to_string());
+    let points = battery_series_inner(&pool, user.0, &q.from, &q.to, &bucket).await?;
+    Ok(Json(json!({ "series": points })))
+}
 
+/// Core of [`body_battery_series`]: contiguous buckets plus the
+/// recharge/drain integral. Split out so readiness baselines can reuse the
+/// exact same stress/battery values the series endpoint serves.
+async fn battery_series_inner(
+    pool: &PgPool,
+    user_id: Uuid,
+    from: &DateTime<Utc>,
+    to: &DateTime<Utc>,
+    bucket: &str,
+) -> ApiResult<Vec<BatterySeriesPoint>> {
     // Contiguous buckets: `generate_series` emits every bucket in [from, to)
     // and the LEFT JOIN keeps the empty ones (zeroed sums, null HR) so the
     // series has no gaps.
@@ -185,11 +205,11 @@ pub async fn body_battery_series(
          GROUP BY gs.b
          ORDER BY gs.b",
     )
-    .bind(&bucket)
-    .bind(user.0)
-    .bind(q.from)
-    .bind(q.to)
-    .fetch_all(&pool)
+    .bind(bucket)
+    .bind(user_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
     .await?;
 
     let mut battery = 300.0;
@@ -221,8 +241,7 @@ pub async fn body_battery_series(
         last_stress = stress;
         points.push(BatterySeriesPoint { ts: r.ts, stress, battery });
     }
-
-    Ok(Json(json!({ "series": points })))
+    Ok(points)
 }
 
 // --- workout detection + acceptance -----------------------------------------
@@ -560,4 +579,269 @@ fn validate_range(q: &RangeQuery) -> ApiResult<()> {
         return Err(ApiError::BadRequest("range exceeds 92 days".to_string()));
     }
     Ok(())
+}
+
+// --- readiness + baselines ---------------------------------------------------
+// The user's own trailing-90-day distributions (resting HR, stress, battery,
+// sleep, active kcal) become percentiles; each day's readiness score is
+// normalized against them: sleep recharges, stress and activity load drain a
+// full 300.
+
+const BASELINE_WINDOW_DAYS: i64 = 90;
+const READINESS_FULL: f64 = 300.0;
+const RECHARGE_PER_P50: f64 = 120.0; // points per 1.0x of the user's p50 sleep
+const RECHARGE_CAP_RATIO: f64 = 1.5; // sleep above 1.5x p50 earns no more points
+const STRESS_DRAIN_MAX: f64 = 100.0;
+const ACTIVITY_DRAIN_MAX: f64 = 80.0;
+const DEFAULT_SLEEP_P50_S: f64 = 8.0 * 3600.0; // no sleep history yet
+const DEFAULT_STRESS_P90: f64 = 150.0; // 0..300 scale (see STRESS_SERIES_FULL_HR)
+const DEFAULT_KCAL_P90: f64 = 400.0; // daily active kcal
+
+/// Per-user baselines over the trailing window: (p10, p50, p90) triples for
+/// the daily resting-HR proxy, the body-battery series stress and battery
+/// values, plus the sleep p50 and active-kcal p90 readiness normalizes by.
+#[derive(Debug)]
+struct Baselines {
+    resting_hr: Option<[f64; 3]>,
+    stress: Option<[f64; 3]>,
+    battery: Option<[f64; 3]>,
+    sleep_s_p50: Option<f64>,
+    kcal_p90: Option<f64>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct RestingRow {
+    day: NaiveDate,
+    proxy: Option<f64>,     // low-5th-percentile heart_rate of the day
+    resting_hr: Option<f64>, // explicit resting_hr average for the day
+    hrv: Option<f64>,
+}
+
+/// Linear-interpolated (p10, p50, p90), the same method as Postgres
+/// `percentile_cont`. None when `values` is empty.
+fn percentiles(values: &[f64]) -> Option<[f64; 3]> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut v = values.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let at = |p: f64| {
+        let idx = p * (v.len() - 1) as f64;
+        let lo = idx.floor() as usize;
+        let hi = lo.min(v.len() - 1);
+        let frac = idx - lo as f64;
+        if lo == hi {
+            v[lo]
+        } else {
+            v[lo] * (1.0 - frac) + v[hi] * frac
+        }
+    };
+    Some([at(0.10), at(0.50), at(0.90)])
+}
+
+fn round1(x: f64) -> f64 {
+    (x * 10.0).round() / 10.0
+}
+
+fn percentile_obj(p: Option<[f64; 3]>) -> Value {
+    match p {
+        Some([p10, p50, p90]) => json!({ "p10": p10, "p50": p50, "p90": p90 }),
+        None => Value::Null,
+    }
+}
+
+/// Per-UTC-day aggregates over [from, to) for the metrics readiness and
+/// baselines normalize against (days with no such data simply have no row).
+async fn fetch_day_aggregates(
+    pool: &PgPool,
+    user_id: Uuid,
+    from: &DateTime<Utc>,
+    to: &DateTime<Utc>,
+) -> ApiResult<Vec<DayAggregate>> {
+    let rows: Vec<DayAggregate> = sqlx::query_as(
+        "SELECT
+            date_trunc('day', ts)::date AS day,
+            COALESCE(SUM(value) FILTER (WHERE metric = 'sleep_seconds'), 0)::float8 AS sleep_s,
+            COALESCE(SUM(value) FILTER (WHERE metric = 'active_calories'), 0)::float8 AS kcal,
+            COALESCE(SUM(value) FILTER (WHERE metric = 'steps'), 0)::float8 AS steps,
+            COALESCE(AVG(value) FILTER (WHERE metric = 'heart_rate'), 0)::float8 AS avg_hr
+         FROM measurements
+         WHERE user_id = $1 AND ts >= $2 AND ts < $3
+           AND metric IN ('sleep_seconds', 'active_calories', 'steps', 'heart_rate')
+         GROUP BY 1
+         ORDER BY 1",
+    )
+    .bind(user_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Per-UTC-day resting-HR proxy (5th percentile of heart_rate), explicit
+/// resting_hr average, and HRV average.
+async fn fetch_resting_rows(
+    pool: &PgPool,
+    user_id: Uuid,
+    from: &DateTime<Utc>,
+    to: &DateTime<Utc>,
+) -> ApiResult<Vec<RestingRow>> {
+    let rows: Vec<RestingRow> = sqlx::query_as(&format!(
+        "WITH base AS (
+            SELECT date_trunc('day', ts)::date AS day, metric, value
+            FROM measurements
+            WHERE user_id = $1 AND ts >= $2 AND ts < $3
+              AND metric IN ('heart_rate', '{METRIC_HRV}', '{METRIC_RESTING_HR}')
+         )
+         SELECT b.day,
+                (SELECT PERCENTILE_CONT(0.05) WITHIN GROUP (ORDER BY h.value)
+                   FROM base h
+                   WHERE h.day = b.day AND h.metric = 'heart_rate')::float8 AS proxy,
+                (SELECT AVG(r.value)
+                   FROM base r
+                   WHERE r.day = b.day AND r.metric = '{METRIC_RESTING_HR}')::float8 AS resting_hr,
+                AVG(b.value) FILTER (WHERE b.metric = '{METRIC_HRV}')::float8 AS hrv
+         FROM base b
+         GROUP BY 1
+         ORDER BY 1",
+    ))
+    .bind(user_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Baselines over the trailing window ending at `to`. Stress and battery
+/// percentiles come straight out of the body-battery series (1-hour buckets)
+/// so they always agree with what the series endpoint shows.
+async fn compute_baselines(
+    pool: &PgPool,
+    user_id: Uuid,
+    from: &DateTime<Utc>,
+    to: &DateTime<Utc>,
+) -> ApiResult<Baselines> {
+    let daily = fetch_day_aggregates(pool, user_id, from, to).await?;
+    let resting = fetch_resting_rows(pool, user_id, from, to).await?;
+
+    // Daily resting HR: the explicit metric wins, else the low-percentile
+    // heart_rate proxy.
+    let resting_hr: Vec<f64> = resting.iter().filter_map(|r| r.resting_hr.or(r.proxy)).collect();
+    let sleep_s: Vec<f64> = daily.iter().filter(|d| d.sleep_s > 0.0).map(|d| d.sleep_s).collect();
+    let kcal: Vec<f64> = daily.iter().filter(|d| d.kcal > 0.0).map(|d| d.kcal).collect();
+
+    let series = battery_series_inner(pool, user_id, from, to, "1 hour").await?;
+    let stress: Vec<f64> = series.iter().map(|p| p.stress).collect();
+    let battery: Vec<f64> = series.iter().map(|p| p.battery).collect();
+
+    // The series is never empty (generate_series fills the whole window);
+    // only report its percentiles when the user actually has data in it.
+    let has_data = !daily.is_empty() || !resting.is_empty();
+    let (stress_p, battery_p) = if has_data {
+        (percentiles(&stress), percentiles(&battery))
+    } else {
+        (None, None)
+    };
+
+    Ok(Baselines {
+        resting_hr: percentiles(&resting_hr),
+        stress: stress_p,
+        battery: battery_p,
+        sleep_s_p50: percentiles(&sleep_s).map(|p| p[1]),
+        kcal_p90: percentiles(&kcal).map(|p| p[2]),
+    })
+}
+
+/// GET /api/v1/metrics/baselines — the user's own trailing-90-day
+/// p10/p50/p90 for resting HR, stress and body battery (null for a signal the
+/// user has no data for yet).
+pub async fn baselines(
+    State(pool): State<PgPool>,
+    Extension(user): Extension<AuthUser>,
+) -> ApiResult<Json<Value>> {
+    let to = Utc::now();
+    let from = to - Duration::days(BASELINE_WINDOW_DAYS);
+    let b = compute_baselines(&pool, user.0, &from, &to).await?;
+    Ok(Json(json!({
+        "restingHr": percentile_obj(b.resting_hr),
+        "stress": percentile_obj(b.stress),
+        "battery": percentile_obj(b.battery),
+    })))
+}
+
+/// GET /api/v1/metrics/readiness?from&to — per-day 0..300 readiness score,
+/// adaptive to the user's own baselines. HRV rides along when present,
+/// null otherwise (graceful degradation for HRV-less sources).
+pub async fn readiness(
+    State(pool): State<PgPool>,
+    Extension(user): Extension<AuthUser>,
+    Query(q): Query<SeriesQuery>,
+) -> ApiResult<Json<Value>> {
+    if q.to <= q.from {
+        return Err(ApiError::BadRequest("'to' must be after 'from'".to_string()));
+    }
+    if (q.to - q.from) > Duration::days(366) {
+        return Err(ApiError::BadRequest("range exceeds 366 days".to_string()));
+    }
+
+    // One baseline pass per request: the trailing 90 days ending at `to`,
+    // so every day normalizes against the same distributions.
+    let base_from = q.from - Duration::days(BASELINE_WINDOW_DAYS);
+    let b = compute_baselines(&pool, user.0, &base_from, &q.to).await?;
+    let sleep_p50 = b.sleep_s_p50.unwrap_or(DEFAULT_SLEEP_P50_S);
+    let stress_p90 = b.stress.map(|p| p[2]).filter(|v| *v > 0.0).unwrap_or(DEFAULT_STRESS_P90);
+    let kcal_p90 = b.kcal_p90.filter(|v| *v > 0.0).unwrap_or(DEFAULT_KCAL_P90);
+
+    let daily = fetch_day_aggregates(&pool, user.0, &q.from, &q.to).await?;
+    let resting = fetch_resting_rows(&pool, user.0, &q.from, &q.to).await?;
+    let day_map: HashMap<NaiveDate, &DayAggregate> = daily.iter().map(|d| (d.day, d)).collect();
+    let rest_map: HashMap<NaiveDate, &RestingRow> =
+        resting.iter().map(|r| (r.day, r)).collect();
+
+    let mut days = Vec::new();
+    let mut d = q.from.date_naive();
+    let last = q.to.date_naive();
+    while d <= last {
+        let agg = day_map.get(&d).copied();
+        let rest = rest_map.get(&d).copied();
+        let sleep_s = agg.map(|a| a.sleep_s).unwrap_or(0.0);
+        let kcal = agg.map(|a| a.kcal).unwrap_or(0.0);
+        let avg_hr = agg.map(|a| a.avg_hr);
+
+        // Recharge: sleep against the user's own p50 (1.0x = 120 pts, capped
+        // at 1.5x). Drains: the day's HR strain against the stress p90
+        // (0..100) and active kcal against the kcal p90 (0..80).
+        let recharge = (sleep_s / sleep_p50).clamp(0.0, RECHARGE_CAP_RATIO) * RECHARGE_PER_P50;
+        let stress = match avg_hr {
+            Some(hr) if hr > STRESS_RESTING_HR =>
+                ((hr - STRESS_RESTING_HR) / (STRESS_SERIES_FULL_HR - STRESS_RESTING_HR) * 300.0)
+                    .clamp(0.0, 300.0),
+            _ => 0.0,
+        };
+        let stress_drain = (stress / stress_p90).clamp(0.0, 1.0) * STRESS_DRAIN_MAX;
+        let activity_drain = (kcal / kcal_p90).clamp(0.0, 1.0) * ACTIVITY_DRAIN_MAX;
+        let score = (READINESS_FULL - stress_drain - activity_drain + recharge)
+            .clamp(0.0, READINESS_FULL);
+
+        let day = d;
+        days.push(json!({
+            "date": day.format("%Y-%m-%d").to_string(),
+            "score": round1(score),
+            "recharge": round1(recharge),
+            "stressDrain": round1(stress_drain),
+            "activityDrain": round1(activity_drain),
+            "restingHr": rest.and_then(|r| r.resting_hr.or(r.proxy)).map(round1),
+            "hrv": rest.and_then(|r| r.hrv).map(round1),
+            "components": [
+                json!({ "key": "sleep", "label": "Sleep recharge", "value": round1(recharge), "max": RECHARGE_PER_P50 * RECHARGE_CAP_RATIO, "direction": "+" }),
+                json!({ "key": "stress", "label": "Stress", "value": round1(stress_drain), "max": STRESS_DRAIN_MAX, "direction": "-" }),
+                json!({ "key": "activity", "label": "Activity", "value": round1(activity_drain), "max": ACTIVITY_DRAIN_MAX, "direction": "-" })
+            ],
+        }));
+        d += Duration::days(1);
+    }
+
+    Ok(Json(json!({ "days": days })))
 }

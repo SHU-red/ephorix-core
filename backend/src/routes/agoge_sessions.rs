@@ -245,6 +245,19 @@ pub async fn stats(
     .fetch_one(&pool)
     .await?;
 
+    let sets_agg: (i64, i64, f64) = sqlx::query_as(
+        "SELECT
+            COUNT(*)::int8,
+            COALESCE(SUM(reps), 0)::int8,
+            COALESCE(SUM(reps * weight_kg) FILTER (WHERE weight_kg IS NOT NULL), 0)::float8
+         FROM exercise_sets
+         WHERE session_id = $1 AND user_id = $2",
+    )
+    .bind(id)
+    .bind(user.0)
+    .fetch_one(&pool)
+    .await?;
+
     Ok(Json(json!({
         "durationSec": duration_sec,
         "activeSec": duration_sec - pause_sec,
@@ -253,7 +266,282 @@ pub async fn stats(
         "calories": agg.1,
         "avgHr": agg.2,
         "peakHr": agg.3.round() as i64,
+        "sets": sets_agg.0,
+        "totalReps": sets_agg.1,
+        "volumeKg": sets_agg.2,
     })))
+}
+
+// ---------------------------------------------------------------------------
+// Manual exercise sets: per-set rows (reps / weight / rest) for a session.
+// An "exercise" is the group of rows sharing an exercise_name; its id is
+// the id of the earliest set row in the group.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, sqlx::FromRow)]
+struct SetRow {
+    id: Uuid,
+    exercise_name: String,
+    set_number: i32,
+    reps: i32,
+    weight_kg: Option<f64>,
+    rest_sec: Option<i32>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExerciseSetIn {
+    pub set_number: i32,
+    pub reps: i32,
+    #[serde(default)]
+    pub weight_kg: Option<f64>,
+    #[serde(default)]
+    pub rest_sec: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddExercise {
+    pub name: String,
+    pub sets: Vec<ExerciseSetIn>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateExercise {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub sets: Option<Vec<ExerciseSetIn>>,
+}
+
+/// Build the wire shape `{"id", "name", "sets": [...]}` for one exercise
+/// group; `rows` must be ordered by set_number.
+fn exercise_json(group_id: Uuid, name: &str, rows: &[SetRow]) -> serde_json::Value {
+    let sets = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "setNumber": r.set_number,
+                "reps": r.reps,
+                "weightKg": r.weight_kg,
+                "restSec": r.rest_sec,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({ "id": group_id, "name": name, "sets": sets })
+}
+
+/// All exercises of a session: rows grouped by name in first-inserted
+/// order, sets within an exercise ordered by set_number.
+pub async fn exercises(
+    State(pool): State<PgPool>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    sqlx::query_as::<_, AgogeSession>(
+        "SELECT * FROM agoge_sessions WHERE id = $1 AND user_id = $2",
+    )
+    .bind(id)
+    .bind(user.0)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("session {id} not found")))?;
+
+    let rows: Vec<SetRow> = sqlx::query_as(
+        "SELECT id, exercise_name, set_number, reps, weight_kg, rest_sec, created_at,
+                MIN(created_at) OVER (PARTITION BY exercise_name) AS group_start,
+                MIN(set_number) OVER (PARTITION BY exercise_name) AS group_first_set
+         FROM exercise_sets
+         WHERE session_id = $1 AND user_id = $2
+         ORDER BY group_start, group_first_set, set_number, id",
+    )
+    .bind(id)
+    .bind(user.0)
+    .fetch_all(&pool)
+    .await?;
+
+    let mut groups: Vec<Vec<SetRow>> = Vec::new();
+    for r in rows {
+        match groups.last_mut() {
+            Some(g) if g[0].exercise_name == r.exercise_name => g.push(r),
+            _ => groups.push(vec![r]),
+        }
+    }
+    let exercises = groups
+        .iter()
+        .map(|g| {
+            let first = g.iter().min_by_key(|r| (r.created_at, r.set_number)).unwrap();
+            exercise_json(first.id, &first.exercise_name, g)
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "exercises": exercises })))
+}
+
+/// Append a new exercise (and its sets) to the session.
+pub async fn add_exercise(
+    State(pool): State<PgPool>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<AddExercise>,
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    sqlx::query_as::<_, AgogeSession>(
+        "SELECT * FROM agoge_sessions WHERE id = $1 AND user_id = $2",
+    )
+    .bind(id)
+    .bind(user.0)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("session {id} not found")))?;
+    if body.sets.is_empty() {
+        return Err(ApiError::BadRequest("sets must not be empty".to_string()));
+    }
+
+    let mut tx = pool.begin().await?;
+    for s in &body.sets {
+        sqlx::query(
+            "INSERT INTO exercise_sets (session_id, user_id, exercise_name, set_number, reps, weight_kg, rest_sec)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(id)
+        .bind(user.0)
+        .bind(&body.name)
+        .bind(s.set_number)
+        .bind(s.reps)
+        .bind(s.weight_kg)
+        .bind(s.rest_sec)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
+    let rows: Vec<SetRow> = sqlx::query_as(
+        "SELECT id, exercise_name, set_number, reps, weight_kg, rest_sec, created_at
+         FROM exercise_sets
+         WHERE session_id = $1 AND user_id = $2 AND exercise_name = $3
+         ORDER BY set_number",
+    )
+    .bind(id)
+    .bind(user.0)
+    .bind(&body.name)
+    .fetch_all(&pool)
+    .await?;
+    let first = rows.iter().min_by_key(|r| (r.created_at, r.set_number)).unwrap();
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(exercise_json(first.id, &body.name, &rows)),
+    ))
+}
+
+/// Rename and/or wholesale-replace an exercise's sets.
+pub async fn update_exercise(
+    State(pool): State<PgPool>,
+    Extension(user): Extension<AuthUser>,
+    Path((_, eid)): Path<(Uuid, Uuid)>,
+    Json(body): Json<UpdateExercise>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (session_id, old_name): (Uuid, String) = sqlx::query_as(
+        "SELECT es.session_id, es.exercise_name
+         FROM exercise_sets es
+         JOIN agoge_sessions s ON s.id = es.session_id
+         WHERE es.id = $1 AND s.user_id = $2",
+    )
+    .bind(eid)
+    .bind(user.0)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("exercise {eid} not found")))?;
+    if body.sets.as_ref().is_some_and(Vec::is_empty) {
+        return Err(ApiError::BadRequest("sets must not be empty".to_string()));
+    }
+
+    let new_name = body.name.clone().unwrap_or(old_name.clone());
+    let mut tx = pool.begin().await?;
+    if body.name.is_some() {
+        sqlx::query(
+            "UPDATE exercise_sets SET exercise_name = $3
+             WHERE session_id = $1 AND user_id = $2 AND exercise_name = $4",
+        )
+        .bind(session_id)
+        .bind(user.0)
+        .bind(&new_name)
+        .bind(&old_name)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if let Some(sets) = &body.sets {
+        sqlx::query(
+            "DELETE FROM exercise_sets
+             WHERE session_id = $1 AND user_id = $2 AND exercise_name = $3",
+        )
+        .bind(session_id)
+        .bind(user.0)
+        .bind(&new_name)
+        .execute(&mut *tx)
+        .await?;
+        for s in sets {
+            sqlx::query(
+                "INSERT INTO exercise_sets (session_id, user_id, exercise_name, set_number, reps, weight_kg, rest_sec)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(session_id)
+            .bind(user.0)
+            .bind(&new_name)
+            .bind(s.set_number)
+            .bind(s.reps)
+            .bind(s.weight_kg)
+            .bind(s.rest_sec)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    tx.commit().await?;
+
+    let rows: Vec<SetRow> = sqlx::query_as(
+        "SELECT id, exercise_name, set_number, reps, weight_kg, rest_sec, created_at
+         FROM exercise_sets
+         WHERE session_id = $1 AND user_id = $2 AND exercise_name = $3
+         ORDER BY set_number",
+    )
+    .bind(session_id)
+    .bind(user.0)
+    .bind(&new_name)
+    .fetch_all(&pool)
+    .await?;
+    let first = rows.iter().min_by_key(|r| (r.created_at, r.set_number)).unwrap();
+    Ok(Json(exercise_json(first.id, &new_name, &rows)))
+}
+
+/// Remove an exercise and all of its sets.
+pub async fn delete_exercise(
+    State(pool): State<PgPool>,
+    Extension(user): Extension<AuthUser>,
+    Path((_, eid)): Path<(Uuid, Uuid)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (session_id, name): (Uuid, String) = sqlx::query_as(
+        "SELECT es.session_id, es.exercise_name
+         FROM exercise_sets es
+         JOIN agoge_sessions s ON s.id = es.session_id
+         WHERE es.id = $1 AND s.user_id = $2",
+    )
+    .bind(eid)
+    .bind(user.0)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("exercise {eid} not found")))?;
+
+    sqlx::query(
+        "DELETE FROM exercise_sets
+         WHERE session_id = $1 AND user_id = $2 AND exercise_name = $3",
+    )
+    .bind(session_id)
+    .bind(user.0)
+    .bind(&name)
+    .execute(&pool)
+    .await?;
+    Ok(Json(json!({ "deleted": eid })))
 }
 
 fn validate_times(start: DateTime<Utc>, end: Option<DateTime<Utc>>) -> ApiResult<()> {

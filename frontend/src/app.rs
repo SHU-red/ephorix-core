@@ -210,6 +210,65 @@ fn rank_for(n: usize) -> (&'static str, &'static str) {
         _ => ("Hoplite", "the heavy infantry — where every Spartan begins"),
     }
 }
+
+/// "p10 / p50 / p90" for a baseline triple, "—" when the signal has no data.
+fn baseline_triple(p: Option<&BaselinePercentile>) -> String {
+    match p {
+        Some(t) => format!("{:.0} / {:.0} / {:.0}", t.p10, t.p50, t.p90),
+        None => "—".to_string(),
+    }
+}
+
+/// Local calendar date as "YYYY-MM-DD".
+fn local_date_str(d: &js_sys::Date) -> String {
+    format!("{:04}-{:02}-{:02}", d.get_full_year(), d.get_month() + 1, d.get_date())
+}
+
+/// Today's local date as "YYYY-MM-DD".
+fn today_str() -> String {
+    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(js_sys::Date::now()));
+    local_date_str(&d)
+}
+
+/// Shift a "YYYY-MM-DD" local date by whole days (calendar-aware).
+fn shift_day(date: &str, delta: i32) -> String {
+    let p: Vec<i32> = date.split('-').filter_map(|s| s.parse().ok()).collect();
+    let (y, m, d) = match p.as_slice() {
+        [y, m, d] => (*y, *m, *d),
+        _ => return today_str(),
+    };
+    local_date_str(&js_sys::Date::new_with_year_month_day(y as u32, m - 1, d + delta))
+}
+
+/// Parse a goal text input to f64 (blank/invalid → fallback).
+fn goal_f64(s: &str, fallback: f64) -> f64 {
+    s.trim().parse().unwrap_or(fallback)
+}
+
+/// Progress-bar width percent, capped at 100 like the other target bars.
+fn goal_pct(have: f64, goal: f64) -> f64 {
+    if goal <= 0.0 { 0.0 } else { (have / goal * 100.0).min(100.0) }
+}
+
+/// One-line label for a logged entry in the Syssitia list.
+fn meal_label(m: &NutritionMeal) -> String {
+    let label = match m.r#type.as_str() {
+        "water" => format!("Water — {:.0} ml", m.amount),
+        "meal" => {
+            let raw = m.meal_type.clone().unwrap_or_else(|| "Meal".to_string());
+            let mut chars = raw.chars();
+            let first = chars.next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+            let title = format!("{first}{}", chars.as_str());
+            format!("{title} — {:.0} kcal · P{:.0}/C{:.0}/F{:.0} g", m.amount, m.protein, m.carbs, m.fat)
+        }
+        _ => format!("Food — {:.0} kcal · P{:.0}/C{:.0}/F{:.0} g", m.amount, m.protein, m.carbs, m.fat),
+    };
+    match &m.note {
+        Some(n) if !n.trim().is_empty() => format!("{label} · {n}"),
+        _ => label,
+    }
+}
+
 pub fn App() -> impl IntoView {
     let (token, set_token) = create_signal("ephorix-dev-1".to_string());
     // Empty = same origin (served behind the web service, /api proxied to
@@ -245,6 +304,10 @@ pub fn App() -> impl IntoView {
     let (ai_key, set_ai_key) = create_signal(String::new());
     let (body_energy, set_body_energy) = create_signal(None::<BodyEnergyDay>);
     let (battery_series, set_battery_series) = create_signal(Vec::<BatterySeriesPoint>::new());
+    let (readiness, set_readiness) = create_signal(None::<Vec<ReadinessDay>>);
+    let (readiness_error, set_readiness_error) = create_signal(None::<String>);
+    let (readiness_loading, set_readiness_loading) = create_signal(true);
+    let (baselines, set_baselines) = create_signal(None::<Baselines>);
     let (log, set_log) = create_signal(Vec::<LogEntry>::new());
     let log_counter = create_rw_signal(0u64);
     let log_event = move |kind: &'static str, msg: &str| {
@@ -265,6 +328,30 @@ pub fn App() -> impl IntoView {
     // Syssitia manual entry.
     let (manual_kind, set_manual_kind) = create_signal("food".to_string());
     let (manual_amount, set_manual_amount) = create_signal(String::new());
+    // Nomoi import panel: pick file -> client-side parse -> preview -> POST /import.
+    let (import_source, set_import_source) = create_signal("csv".to_string());
+    let (import_device, set_import_device) = create_signal(String::new());
+    let (import_name, set_import_name) = create_signal(String::new());
+    let (import_buf, set_import_buf) = create_signal(Vec::<Value>::new());
+    let (import_preview, set_import_preview) = create_signal(Vec::<(String, String, f64)>::new());
+    let (import_errors, set_import_errors) = create_signal(Vec::<String>::new());
+    let (importing, set_importing) = create_signal(false);
+    let (import_result, set_import_result) = create_signal(None::<(usize, usize, Vec<String>)>);
+    // Syssitia daily log: selected day, daily totals + entries, goals.
+    let (nut_day, set_nut_day) = create_signal(today_str());
+    let (nut_daily, set_nut_daily) = create_signal::<Option<NutritionDaily>>(None);
+    let (manual_protein, set_manual_protein) = create_signal(String::new());
+    let (manual_carbs, set_manual_carbs) = create_signal(String::new());
+    let (manual_fat, set_manual_fat) = create_signal(String::new());
+    let (manual_meal_type, set_manual_meal_type) = create_signal("breakfast".to_string());
+    let (manual_note, set_manual_note) = create_signal(String::new());
+    // Nutrition goals — persisted under settings.nutrition.
+    let (goal_water, set_goal_water) = create_signal("2500".to_string());
+    let (goal_kcal, set_goal_kcal) = create_signal("2200".to_string());
+    let (goal_protein, set_goal_protein) = create_signal("140".to_string());
+    let (goal_carb, set_goal_carb) = create_signal("250".to_string());
+    let (goal_fat, set_goal_fat) = create_signal("70".to_string());
+
 
     // Persist series visibility + range to the backend settings.
     let persist_settings = move || {
@@ -323,6 +410,19 @@ pub fn App() -> impl IntoView {
                 Ok(s) => set_battery_series.set(s),
                 Err(_) => {}
             }
+            // Readiness (today + last 14 days) and 90-day baselines —
+            // independent of the main timeline range.
+            let r_from = to_ms - 14.0 * 86_400_000.0;
+            set_readiness_error.set(None);
+            set_readiness_loading.set(true);
+            match fetch_readiness(&base, &token, r_from, to_ms).await {
+                Ok(d) => set_readiness.set(Some(d)),
+                Err(e) => set_readiness_error.set(Some(e)),
+            }
+            set_readiness_loading.set(false);
+            if let Ok(b) = fetch_baselines(&base, &token).await {
+                set_baselines.set(Some(b));
+            }
             // Settings load once per session (do not clobber user changes).
             if !loaded {
                 if let Ok(sv) = fetch_settings(&base, &token).await {
@@ -344,6 +444,24 @@ pub fn App() -> impl IntoView {
                         set_target_kcal.set(t.get("kcal").and_then(|v| v.as_i64()).unwrap_or(500));
                         set_target_sleep.set(t.get("sleepH").and_then(|v| v.as_f64()).unwrap_or(8.0));
                     }
+                    if let Some(n) = sv.get("nutrition") {
+                        if let Some(v) = n.get("waterGoalMl").and_then(|v| v.as_f64()) {
+                            set_goal_water.set(v.to_string());
+                        }
+                        if let Some(v) = n.get("kcalGoal").and_then(|v| v.as_f64()) {
+                            set_goal_kcal.set(v.to_string());
+                        }
+                        if let Some(v) = n.get("proteinGoal").and_then(|v| v.as_f64()) {
+                            set_goal_protein.set(v.to_string());
+                        }
+                        if let Some(v) = n.get("carbGoal").and_then(|v| v.as_f64()) {
+                            set_goal_carb.set(v.to_string());
+                        }
+                        if let Some(v) = n.get("fatGoal").and_then(|v| v.as_f64()) {
+                            set_goal_fat.set(v.to_string());
+                        }
+                    }
+
                     set_settings_loaded.set(true);
                 }
             }
@@ -653,6 +771,24 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // Syssitia daily log: fetch the selected day's totals + entries whenever
+    // the day (or api base/token) changes, or after a manual bump.
+    let nut_refresh = create_rw_signal(0u32);
+    create_effect(move |_| {
+        let _ = nut_refresh.get();
+        let day = nut_day.get();
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            match fetch_daily_nutrition(&base, &token, &day).await {
+                Ok(d) => set_nut_daily.set(Some(d)),
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    });
+    let nut_day_nav = move |delta: i32| set_nut_day.update(|d| *d = shift_day(d, delta));
+    let nut_day_today = move |_| set_nut_day.set(today_str());
+
     // AI-assisted nutrition entry: describe a meal/drink -> parse -> log.
     let ai_submit = move |_| {
         let text = ai_text.get().trim().to_string();
@@ -673,12 +809,13 @@ pub fn App() -> impl IntoView {
                         "consumedAt": iso_from_ms(js_sys::Date::now()),
                         "note": text,
                     });
-                    if let Err(e) = post_json(&base, &token, "/api/v1/nutrition", &body).await {
+                    if let Err(e) = add_nutrition(&base, &token, &body).await {
                         set_error.set(Some(e));
                     }
                     set_ai_text.set(String::new());
                     log_event("ai", &format!("logged nutrition via AI ({kind} {amount:.0})"));
                     refresh();
+                    nut_refresh.set(nut_refresh.get() + 1);
                 }
                 Err(e) => set_error.set(Some(e)),
             }
@@ -691,20 +828,148 @@ pub fn App() -> impl IntoView {
         if amount <= 0.0 {
             return;
         }
+        let protein = manual_protein.get().trim().parse::<f64>().unwrap_or(0.0);
+        let carbs = manual_carbs.get().trim().parse::<f64>().unwrap_or(0.0);
+        let fat = manual_fat.get().trim().parse::<f64>().unwrap_or(0.0);
+        if protein < 0.0 || carbs < 0.0 || fat < 0.0 {
+            return;
+        }
+        // The backend stores every entry as water|food; a meal is a food
+        // entry tagged with its meal type.
+        let meal_type = if kind == "meal" { Some(manual_meal_type.get()) } else { None };
+        let note = manual_note.get().trim().to_string();
         let base = base.get();
         let token = token.get();
         spawn_local(async move {
-            let body = json!({
-                "kind": kind,
+            let mut body = json!({
+                "kind": if kind == "water" { "water" } else { "food" },
                 "amount": amount,
                 "consumedAt": iso_from_ms(js_sys::Date::now()),
             });
-            if let Err(e) = post_json(&base, &token, "/api/v1/nutrition", &body).await {
+            if kind != "water" {
+                body["protein"] = json!(protein);
+                body["carbs"] = json!(carbs);
+                body["fat"] = json!(fat);
+            }
+            if let Some(mt) = meal_type.filter(|mt| !mt.is_empty()) {
+                body["mealType"] = json!(mt);
+            }
+            if !note.is_empty() {
+                body["note"] = json!(note);
+            }
+            if let Err(e) = add_nutrition(&base, &token, &body).await {
                 set_error.set(Some(e));
+                return;
             }
             set_manual_amount.set(String::new());
+            set_manual_protein.set(String::new());
+            set_manual_carbs.set(String::new());
+            set_manual_fat.set(String::new());
+            set_manual_note.set(String::new());
             log_event("nutrition", &format!("logged {kind} {amount:.0}"));
             refresh();
+            nut_refresh.set(nut_refresh.get() + 1);
+        });
+    };
+
+    // Persist nutrition goals into settings.nutrition, merging with the
+    // existing settings blob so other keys are preserved.
+    let save_nutrition_goals = move |_| {
+        let base = base.get();
+        let token = token.get();
+        let goals = json!({
+            "waterGoalMl": goal_water.get().trim().parse::<f64>().unwrap_or(2500.0),
+            "kcalGoal": goal_kcal.get().trim().parse::<f64>().unwrap_or(2200.0),
+            "proteinGoal": goal_protein.get().trim().parse::<f64>().unwrap_or(140.0),
+            "carbGoal": goal_carb.get().trim().parse::<f64>().unwrap_or(250.0),
+            "fatGoal": goal_fat.get().trim().parse::<f64>().unwrap_or(70.0),
+        });
+        spawn_local(async move {
+            let mut settings = fetch_settings(&base, &token).await.unwrap_or(Value::Null);
+            if !settings.is_object() {
+                settings = json!({});
+            }
+            settings["nutrition"] = goals;
+            if let Err(e) = put_settings(&base, &token, &settings).await {
+                set_error.set(Some(e));
+            } else {
+                log_event("settings", "saved nutrition goals");
+                nut_refresh.set(nut_refresh.get() + 1);
+            }
+        });
+    };
+
+    // -- Nomoi import: parse picked file client-side, preview, POST /import --
+
+    let on_import_file = move |ev: web_sys::Event| {
+        let file = event_target_files(&ev).and_then(|mut v| v.pop());
+        let Some(file) = file else { return };
+        let name = file.name();
+        set_import_name.set(name.clone());
+        set_import_result.set(None);
+        set_importing.set(true);
+        spawn_local(async move {
+            let text = match read_file_text(&file).await {
+                Ok(t) => t,
+                Err(e) => {
+                    set_import_buf.set(Vec::new());
+                    set_import_preview.set(Vec::new());
+                    set_import_errors.set(vec![e]);
+                    set_importing.set(false);
+                    return;
+                }
+            };
+            let lower = name.to_ascii_lowercase();
+            let (samples, errors) = if lower.ends_with(".gpx") {
+                parse_import_gpx(&text)
+            } else if lower.ends_with(".json") {
+                parse_import_json(&text)
+            } else {
+                parse_import_csv(&text)
+            };
+            set_import_buf.set(samples.clone());
+            set_import_preview.set(
+                samples
+                    .iter()
+                    .take(5)
+                    .map(|s| {
+                        (
+                            s.get("timestamp").and_then(|v| v.as_str()).unwrap_or("").chars().take(16).collect::<String>(),
+                            s.get("metric").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
+                            s.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        )
+                    })
+                    .collect(),
+            );
+            set_import_errors.set(errors);
+            set_importing.set(false);
+        });
+    };
+
+    let do_import = move |_| {
+        let samples = import_buf.get();
+        if samples.is_empty() {
+            set_import_result.set(Some((0, 0, vec!["nothing to import — pick a file first".to_string()])));
+            return;
+        }
+        let (base, token, source, device) = (
+            base.get(),
+            token.get(),
+            import_source.get(),
+            import_device.get().trim().to_string(),
+        );
+        set_importing.set(true);
+        spawn_local(async move {
+            let device_id = if device.is_empty() { None } else { Some(device) };
+            match import_samples(&base, &token, &source, device_id.as_deref(), &samples).await {
+                Ok(r) => {
+                    set_import_result.set(Some((r.inserted, r.skipped, r.errors)));
+                    log_event("import", &format!("POST /import ({source}) · {} inserted · {} skipped", r.inserted, r.skipped));
+                    refresh();
+                }
+                Err(e) => set_import_result.set(Some((0, 0, vec![e]))),
+            }
+            set_importing.set(false);
         });
     };
 
@@ -748,7 +1013,7 @@ pub fn App() -> impl IntoView {
                 {move || match current_tab.get() {
                     Tab::Gymnasia => view! {
                         <TabHero tab=Tab::Gymnasia />
-                        <div class="kpi">
+                        <div class="kpi" style="grid-template-columns: repeat(6, 1fr)">
                             <div class="kpi-chip">
                                 <span class="kpi-label">"HEART RATE"</span>
                                 <div class="kpi-value">
@@ -785,6 +1050,14 @@ pub fn App() -> impl IntoView {
                                 <span class="kpi-label">"BODY BATTERY"</span>
                                 <div class="kpi-value">
                                     {move || body_energy.get().map(|b| format!("{:.0}", b.score)).unwrap_or_else(|| "—".to_string())}
+                                    <span class="unit">"/300"</span>
+                                </div>
+                            </div>
+                            <div class="kpi-chip">
+                                <span class="kpi-label">"READINESS"</span>
+                                <div class="kpi-value">
+                                    {move || readiness.get().and_then(|d| d.last().map(|t| format!("{:.0}", t.score)))
+                                        .unwrap_or_else(|| "—".to_string())}
                                     <span class="unit">"/300"</span>
                                 </div>
                             </div>
@@ -1027,16 +1300,111 @@ pub fn App() -> impl IntoView {
                     Tab::Syssitia => view! {
                         <TabHero tab=Tab::Syssitia />
                         <section class="panel">
+                            <div class="panel-head">
+                                <h2>"DAILY RATION"</h2>
+                                <div class="nut-nav">
+                                    <span class="nut-date">{move || { let d = nut_day.get(); if d == today_str() { "TODAY".to_string() } else { d } }}</span>
+                                    <button class="btn small" on:click=move |_| nut_day_nav(-1)>"PREV"</button>
+                                    <button class="btn small" on:click=move |_| nut_day_nav(1)>"NEXT"</button>
+                                    <button class="btn small" on:click=nut_day_today>"TODAY"</button>
+                                </div>
+                            </div>
+                            <div class="kpi">
+                                <div class="kpi-chip">
+                                    <span class="kpi-label">"KCAL"</span>
+                                    <div class="kpi-value">{move || nut_daily.get().map(|d| format!("{:.0}", d.kcal)).unwrap_or_else(|| "—".to_string())}<span class="unit">{move || format!("/ {:.0}", goal_f64(&goal_kcal.get(), 2200.0))}</span></div>
+                                </div>
+                                <div class="kpi-chip">
+                                    <span class="kpi-label">"PROTEIN"</span>
+                                    <div class="kpi-value">{move || nut_daily.get().map(|d| format!("{:.0}", d.protein)).unwrap_or_else(|| "—".to_string())}<span class="unit">{move || format!("/ {:.0} G", goal_f64(&goal_protein.get(), 140.0))}</span></div>
+                                </div>
+                                <div class="kpi-chip">
+                                    <span class="kpi-label">"CARBS"</span>
+                                    <div class="kpi-value">{move || nut_daily.get().map(|d| format!("{:.0}", d.carbs)).unwrap_or_else(|| "—".to_string())}<span class="unit">{move || format!("/ {:.0} G", goal_f64(&goal_carb.get(), 250.0))}</span></div>
+                                </div>
+                                <div class="kpi-chip">
+                                    <span class="kpi-label">"FAT"</span>
+                                    <div class="kpi-value">{move || nut_daily.get().map(|d| format!("{:.0}", d.fat)).unwrap_or_else(|| "—".to_string())}<span class="unit">{move || format!("/ {:.0} G", goal_f64(&goal_fat.get(), 70.0))}</span></div>
+                                </div>
+                                <div class="kpi-chip">
+                                    <span class="kpi-label">"WATER"</span>
+                                    <div class="kpi-value">{move || nut_daily.get().map(|d| format!("{:.0}", d.water_ml)).unwrap_or_else(|| "—".to_string())}<span class="unit">{move || format!("/ {:.0} ML", goal_f64(&goal_water.get(), 2500.0))}</span></div>
+                                </div>
+                            </div>
+                            <div class="nut-bars">
+                                <div class="nut-row">
+                                    <span class="nut-label">"KCAL"</span>
+                                    <div class="bar">
+                                        <div class="bar-fill" style=move || format!("width: {}%", goal_pct(nut_daily.get().map(|d| d.kcal).unwrap_or(0.0), goal_f64(&goal_kcal.get(), 2200.0)))></div>
+                                    </div>
+                                    <span class="nut-num">{move || format!("{:.0} / {:.0}", nut_daily.get().map(|d| d.kcal).unwrap_or(0.0), goal_f64(&goal_kcal.get(), 2200.0))}</span>
+                                </div>
+                                <div class="nut-row">
+                                    <span class="nut-label">"PROTEIN"</span>
+                                    <div class="bar">
+                                        <div class="bar-fill" style=move || format!("width: {}%", goal_pct(nut_daily.get().map(|d| d.protein).unwrap_or(0.0), goal_f64(&goal_protein.get(), 140.0)))></div>
+                                    </div>
+                                    <span class="nut-num">{move || format!("{:.0} / {:.0}", nut_daily.get().map(|d| d.protein).unwrap_or(0.0), goal_f64(&goal_protein.get(), 140.0))}</span>
+                                </div>
+                                <div class="nut-row">
+                                    <span class="nut-label">"CARBS"</span>
+                                    <div class="bar">
+                                        <div class="bar-fill" style=move || format!("width: {}%", goal_pct(nut_daily.get().map(|d| d.carbs).unwrap_or(0.0), goal_f64(&goal_carb.get(), 250.0)))></div>
+                                    </div>
+                                    <span class="nut-num">{move || format!("{:.0} / {:.0}", nut_daily.get().map(|d| d.carbs).unwrap_or(0.0), goal_f64(&goal_carb.get(), 250.0))}</span>
+                                </div>
+                                <div class="nut-row">
+                                    <span class="nut-label">"FAT"</span>
+                                    <div class="bar">
+                                        <div class="bar-fill" style=move || format!("width: {}%", goal_pct(nut_daily.get().map(|d| d.fat).unwrap_or(0.0), goal_f64(&goal_fat.get(), 70.0)))></div>
+                                    </div>
+                                    <span class="nut-num">{move || format!("{:.0} / {:.0}", nut_daily.get().map(|d| d.fat).unwrap_or(0.0), goal_f64(&goal_fat.get(), 70.0))}</span>
+                                </div>
+                                <div class="nut-row">
+                                    <span class="nut-label">"WATER"</span>
+                                    <div class="bar">
+                                        <div class="bar-fill" style=move || format!("width: {}%", goal_pct(nut_daily.get().map(|d| d.water_ml).unwrap_or(0.0), goal_f64(&goal_water.get(), 2500.0)))></div>
+                                    </div>
+                                    <span class="nut-num">{move || format!("{:.0} / {:.0}", nut_daily.get().map(|d| d.water_ml).unwrap_or(0.0), goal_f64(&goal_water.get(), 2500.0))}</span>
+                                </div>
+                            </div>
+                        </section>
+                        <section class="panel">
                             <div class="panel-head"><h2>"LOG FOOD / WATER"</h2></div>
                             <div class="settings-grid">
                                 <label class="ctl">"KIND"
                                     <select on:change=move |ev| set_manual_kind.set(event_target_value(&ev))>
                                         <option value="food" selected>"FOOD (kcal)"</option>
                                         <option value="water">"WATER (ml)"</option>
+                                        <option value="meal">"MEAL (kcal + macros)"</option>
                                     </select>
                                 </label>
                                 <label class="ctl">"AMOUNT"
-                                    <input prop:value=manual_amount on:input=move |ev| set_manual_amount.set(event_target_value(&ev)) placeholder="e.g. 420" />
+                                    <input prop:value=manual_amount on:input=move |ev| set_manual_amount.set(event_target_value(&ev)) placeholder="kcal or ml" />
+                                </label>
+                                <Show when=move || manual_kind.get() != "water">
+                                    <label class="ctl">"PROTEIN (g)"
+                                        <input prop:value=manual_protein on:input=move |ev| set_manual_protein.set(event_target_value(&ev)) placeholder="0" />
+                                    </label>
+                                    <label class="ctl">"CARBS (g)"
+                                        <input prop:value=manual_carbs on:input=move |ev| set_manual_carbs.set(event_target_value(&ev)) placeholder="0" />
+                                    </label>
+                                    <label class="ctl">"FAT (g)"
+                                        <input prop:value=manual_fat on:input=move |ev| set_manual_fat.set(event_target_value(&ev)) placeholder="0" />
+                                    </label>
+                                </Show>
+                                <Show when=move || manual_kind.get() == "meal">
+                                    <label class="ctl">"MEAL TYPE"
+                                        <select on:change=move |ev| set_manual_meal_type.set(event_target_value(&ev))>
+                                            <option value="breakfast" selected>"BREAKFAST"</option>
+                                            <option value="lunch">"LUNCH"</option>
+                                            <option value="dinner">"DINNER"</option>
+                                            <option value="snack">"SNACK"</option>
+                                        </select>
+                                    </label>
+                                </Show>
+                                <label class="ctl">"NOTE (OPTIONAL)"
+                                    <input prop:value=manual_note on:input=move |ev| set_manual_note.set(event_target_value(&ev)) placeholder="what it was" />
                                 </label>
                                 <button class="btn" on:click=add_nutrition_manual>"ADD"</button>
                             </div>
@@ -1048,15 +1416,50 @@ pub fn App() -> impl IntoView {
                             </div>
                         </section>
                         <section class="panel">
-                            <div class="panel-head"><h2>"SYSSITIA LOG"</h2><span class="muted">{move || { let w = nutrition.get().iter().filter(|n| n.kind == "water").count(); let f = nutrition.get().len() - w; format!("{f} food · {w} water") }}</span></div>
+                            <div class="panel-head">
+                                <h2>"SYSSITIA LOG"</h2>
+                                <span class="muted">{move || nut_daily.get().map(|d| { let w = d.meals.iter().filter(|m| m.r#type == "water").count(); format!("{} food · {} water", d.meals.len() - w, w) }).unwrap_or_default()}</span>
+                            </div>
                             <ul class="list">
-                                <For each=move || nutrition.get().into_iter().rev() key=|n| n.ts.to_string() let:n>
-                                    <li class="row">
-                                        <span class="row-name">{move || if n.kind == "water" { format!("Water — {:.0} ml", n.amount) } else { format!("Food — {:.0} kcal", n.amount) }}</span>
-                                        <span class="row-time">{move || fmt_time(n.ts)}</span>
-                                    </li>
+                                <For each=move || nut_daily.get().map(|d| d.meals.into_iter().rev().collect::<Vec<_>>()).unwrap_or_default() key=|m| m.id.clone() let:m>
+                                    {move || {
+                                        let label = meal_label(&m);
+                                        let time = ms_from_iso(&m.consumed_at).map(fmt_time).unwrap_or_default();
+                                        view! {
+                                            <li class="row">
+                                                <span class="row-name">{label}</span>
+                                                <span class="row-time">{time}</span>
+                                            </li>
+                                        }
+                                    }}
                                 </For>
                             </ul>
+                            {move || if nut_daily.get().map(|d| d.meals.is_empty()).unwrap_or(true) {
+                                view! { <p class="muted">"Nothing logged for this day."</p> }.into_view()
+                            } else {
+                                view! {}.into_view()
+                            }}
+                        </section>
+                        <section class="panel">
+                            <div class="panel-head"><h2>"GOALS"</h2><span class="muted">"saved under settings.nutrition"</span></div>
+                            <div class="settings-grid">
+                                <label class="ctl">"WATER (ml)"
+                                    <input prop:value=goal_water on:input=move |ev| set_goal_water.set(event_target_value(&ev)) placeholder="2500" />
+                                </label>
+                                <label class="ctl">"KCAL / DAY"
+                                    <input prop:value=goal_kcal on:input=move |ev| set_goal_kcal.set(event_target_value(&ev)) placeholder="2200" />
+                                </label>
+                                <label class="ctl">"PROTEIN (g)"
+                                    <input prop:value=goal_protein on:input=move |ev| set_goal_protein.set(event_target_value(&ev)) placeholder="140" />
+                                </label>
+                                <label class="ctl">"CARBS (g)"
+                                    <input prop:value=goal_carb on:input=move |ev| set_goal_carb.set(event_target_value(&ev)) placeholder="250" />
+                                </label>
+                                <label class="ctl">"FAT (g)"
+                                    <input prop:value=goal_fat on:input=move |ev| set_goal_fat.set(event_target_value(&ev)) placeholder="70" />
+                                </label>
+                                <button class="btn" on:click=save_nutrition_goals>"SAVE GOALS"</button>
+                            </div>
                         </section>
                     }.into_view(),
 
@@ -1079,30 +1482,147 @@ pub fn App() -> impl IntoView {
                         </section>
                     }.into_view(),
 
-                    Tab::Anapavsis => view! {
-                        <TabHero tab=Tab::Anapavsis />
-                        <section class="panel">
-                            <div class="panel-head"><h2>"BODY BATTERY"</h2><span class="muted">"full = 300 · the 300"</span></div>
-                            <div class="kpi">
-                                <div class="kpi-chip">
-                                    <span class="kpi-label">"BODY BATTERY"</span>
-                                    <div class="kpi-value">{move || body_energy.get().map(|b| format!("{:.0}", b.score)).unwrap_or_else(|| "—".to_string())}<span class="unit">"/300"</span></div>
+                    Tab::Anapavsis => {
+                        const RING_C: f64 = 2.0 * std::f64::consts::PI * 54.0; // arc length, r = 54
+                        view! {
+                            <TabHero tab=Tab::Anapavsis />
+                            <section class="panel">
+                                <div class="panel-head">
+                                    <h2>"READINESS"</h2>
+                                    <span class="muted">"score out of 300 · the 300"</span>
                                 </div>
-                                <div class="kpi-chip">
-                                    <span class="kpi-label">"STRESS"</span>
-                                    <div class="kpi-value">{move || body_energy.get().map(|b| format!("{:.0}", b.stress)).unwrap_or_else(|| "—".to_string())}<span class="unit">"/100"</span></div>
+                                <Show when=move || readiness_loading.get() fallback=|| ()>
+                                    <div class="muted">"MEASURING READINESS…"</div>
+                                </Show>
+                                <Show when=move || readiness_error.get().is_some() fallback=|| ()>
+                                    {move || format!("READINESS UNAVAILABLE — {}", readiness_error.get().unwrap_or_default())}
+                                </Show>
+                                <Show
+                                    when=move || !readiness_loading.get() && readiness_error.get().is_none() && readiness.get().is_some()
+                                    fallback=|| ()
+                                >
+                                    {move || {
+                                        let days = readiness.get().unwrap_or_default();
+                                        let today = days.last().cloned();
+                                        let score = today.as_ref().map(|t| t.score).unwrap_or(0.0);
+                                        let dash = (score / 300.0).clamp(0.0, 1.0) * RING_C;
+                                        let resting_hr = today.as_ref().and_then(|t| t.resting_hr);
+                                        let hrv = today.as_ref().and_then(|t| t.hrv);
+                                        // Last 14 days, oldest → newest, for the mini trend.
+                                        let trend: Vec<(String, f64)> = days
+                                            .iter()
+                                            .rev()
+                                            .take(14)
+                                            .map(|d| (d.date.clone(), d.score))
+                                            .collect::<Vec<_>>()
+                                            .into_iter()
+                                            .rev()
+                                            .collect();
+                                        let components = today.as_ref().map(|t| {
+                                            t.components.iter().map(|c| {
+                                                let gain = c.direction == "+";
+                                                let width = (c.value / c.max).clamp(0.0, 1.0) * 100.0;
+                                                let sign = if gain { "+" } else { "−" };
+                                                let cls = if gain { "readiness-component gain" } else { "readiness-component drain" };
+                                                let label = c.label.clone();
+                                                let value = c.value;
+                                                let max = c.max;
+                                                view! {
+                                                    <div class=cls>
+                                                        <div class="rc-head">
+                                                            <span class="rc-label">{label}</span>
+                                                            <span class="rc-value">{format!("{value:.0} / {max:.0} {sign}")}</span>
+                                                        </div>
+                                                        <div class="bar"><div class="bar-fill" style={format!("width:{width:.1}%")} /></div>
+                                                    </div>
+                                                }
+                                            }).collect_view()
+                                        });
+                                        let today_bar_index = trend.len().saturating_sub(1);
+                                        let bars = trend.iter().enumerate().map(|(i, (date, s))| {
+                                            let h = ((*s) / 300.0 * 64.0).max(1.0);
+                                            let x = i as f64 * 24.0 + 3.0;
+                                            let y = 64.0 - h;
+                                            let cls = if i == today_bar_index { "trend-bar today" } else { "trend-bar" };
+                                            view! {
+                                                <rect x={x.to_string()} y={y.to_string()} width="18" height={h.to_string()} class=cls>
+                                                    <title>{format!("{date} · {s:.0}")}</title>
+                                                </rect>
+                                            }
+                                        }).collect_view();
+                                        let today_date = today.as_ref().map(|t| t.date.clone()).unwrap_or_default();
+                                        let resting_hr = resting_hr.map(|v| format!("{v:.0}")).unwrap_or_else(|| "—".to_string());
+                                        let hrv = hrv.map(|v| format!("{v:.0}")).unwrap_or_else(|| "—".to_string());
+                                        view! {
+                                            <div class="readiness-layout">
+                                                <div class="readiness-ring-col">
+                                                    <div class="readiness-ring">
+                                                        <svg viewBox="0 0 120 120" class="ring-svg">
+                                                            <circle cx="60" cy="60" r="54" class="ring-track" fill="none" stroke-width="8" />
+                                                            <circle cx="60" cy="60" r="54" class="ring-arc" fill="none" stroke-width="8"
+                                                                transform="rotate(-90 60 60)" stroke-dasharray=format!("{dash} {}", RING_C) />
+                                                        </svg>
+                                                        <div class="ring-center">
+                                                            <span class="ring-score">{format!("{score:.0}")}</span>
+                                                            <span class="ring-max">"OF 300"</span>
+                                                        </div>
+                                                    </div>
+                                                    <div class="ring-date">{format!("TODAY · {today_date}")}</div>
+                                                </div>
+                                                <div class="readiness-side">
+                                                    {components.unwrap_or_else(|| Fragment::new(Vec::new()).into())}
+                                                    <div class="kpi" style="grid-template-columns: repeat(2, 1fr)">
+                                                        <div class="kpi-chip">
+                                                            <span class="kpi-label">"RESTING HR"</span>
+                                                            <div class="kpi-value">{resting_hr}<span class="unit">"BPM"</span></div>
+                                                        </div>
+                                                        <div class="kpi-chip">
+                                                            <span class="kpi-label">"HRV"</span>
+                                                            <div class="kpi-value">{hrv}</div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="readiness-trend">
+                                                        <div class="trend-caption">"LAST 14 DAYS · SCORE / 300"</div>
+                                                        <svg viewBox="0 0 336 64" class="trend-svg" preserveAspectRatio="none">{bars}</svg>
+                                                    </div>
+                                                    <p class="muted">"READINESS = 300 + SLEEP RECHARGE − STRESS DRAIN − ACTIVITY DRAIN, NORMALIZED AGAINST YOUR OWN 90-DAY BASELINES. SLEEP LONG, TRAIN HARD, AND THE RING STAYS NEAR THE 300."</p>
+                                                </div>
+                                            </div>
+                                        }
+                                    }}
+                                </Show>
+                            </section>
+                            <section class="panel">
+                                <div class="panel-head">
+                                    <h2>"BASELINES · TRAILING 90 DAYS"</h2>
+                                    <span class="muted">"your own history · p10 / p50 / p90"</span>
                                 </div>
-                                <div class="kpi-chip">
-                                    <span class="kpi-label">"DRAIN"</span>
-                                    <div class="kpi-value">{move || body_energy.get().map(|b| format!("{:.0}", b.drain)).unwrap_or_else(|| "—".to_string())}<span class="unit">"PTS"</span></div>
-                                </div>
-                                <div class="kpi-chip">
-                                    <span class="kpi-label">"SLEEP (RANGE)"</span>
-                                    <div class="kpi-value">{move || format!("{:.1}", sleep.get().iter().map(|s| s.sleep_seconds).sum::<f64>() / 3600.0)}<span class="unit">"H"</span></div>
-                                </div>
-                            </div>
-                            <p class="muted" style="margin-top:12px">"Anapavsis = 300 + sleep recharge − activity drain − stress. Stress is an HR-elevation strain score (no HRV on the watch). Sleep long, train hard, and the battery stays near the 300."</p>
-                        </section>
+                                <Show when=move || baselines.get().is_none() fallback=|| ()>
+                                    <div class="muted">"NO BASELINES YET — THE TRAILING 90 DAYS ARE STILL FILLING IN."</div>
+                                </Show>
+                                <Show when=move || baselines.get().is_some() fallback=|| ()>
+                                    {move || {
+                                        let b = baselines.get().unwrap();
+                                        view! {
+                                            <div class="kpi" style="grid-template-columns: repeat(3, 1fr)">
+                                                <div class="kpi-chip">
+                                                    <span class="kpi-label">"RESTING HR · BPM"</span>
+                                                    <div class="kpi-value">{baseline_triple(b.resting_hr.as_ref())}</div>
+                                                </div>
+                                                <div class="kpi-chip">
+                                                    <span class="kpi-label">"STRESS · PTS"</span>
+                                                    <div class="kpi-value">{baseline_triple(b.stress.as_ref())}</div>
+                                                </div>
+                                                <div class="kpi-chip">
+                                                    <span class="kpi-label">"BODY BATTERY · PTS"</span>
+                                                    <div class="kpi-value">{baseline_triple(b.battery.as_ref())}</div>
+                                                </div>
+                                            </div>
+                                        }
+                                    }}
+                                </Show>
+                            </section>
+                        }
                     }.into_view(),
 
                     Tab::Nomoi => view! {
@@ -1133,6 +1653,72 @@ pub fn App() -> impl IntoView {
                             </div>
                             <p class="muted" style="margin-top:12px">"One OpenAI-compatible protocol for local (Ollama, LM Studio, llama.cpp) and remote providers — only the URL differs, so everything can stay on your machine."</p>
                             <button class="btn" style="margin-top:12px" on:click=move |_| persist_settings()>"SAVE"</button>
+                        </section>
+                        <section class="panel import-panel">
+                            <div class="panel-head"><h2>"IMPORT DATA"</h2><span class="muted">{move || import_name.get()}</span></div>
+                            <div class="settings-grid">
+                                <label class="ctl">"SOURCE"
+                                    <select on:change=move |ev| set_import_source.set(event_target_value(&ev))>
+                                        <option value="csv">"CSV"</option>
+                                        <option value="manual">"JSON"</option>
+                                        <option value="health_connect">"HEALTH CONNECT"</option>
+                                        <option value="apple_health">"APPLE HEALTH"</option>
+                                        <option value="garmin">"GARMIN"</option>
+                                        <option value="gpx">"GPX"</option>
+                                    </select>
+                                </label>
+                                <label class="ctl">"FILE (.CSV / .JSON / .GPX)"
+                                    <input type="file" accept=".csv,.json,.gpx" on:change=on_import_file />
+                                </label>
+                                <label class="ctl">"DEVICE ID (OPTIONAL)"
+                                    <input prop:value=import_device on:input=move |ev| set_import_device.set(event_target_value(&ev)) placeholder="e.g. pixel-9" />
+                                </label>
+                            </div>
+                            <div class="import-actions">
+                                <button class="btn" disabled=move || importing.get() on:click=do_import>{move || if importing.get() { "IMPORTING…".to_string() } else { format!("IMPORT {} SAMPLES", import_buf.get().len()) }}</button>
+                                <span class="muted">"PARSED IN THE BROWSER — NOTHING IS POSTED UNTIL YOU PRESS IMPORT"</span>
+                            </div>
+                            {move || {
+                                let count = import_buf.get().len();
+                                if count == 0 {
+                                    return view! {}.into_view();
+                                }
+                                let preview = import_preview.get();
+                                let parse_errs = import_errors.get();
+                                view! {
+                                    <div class="import-preview">
+                                        <p class="muted" style="margin:12px 0 6px">{format!("{count} SAMPLES PARSED · PREVIEW FIRST 5")}</p>
+                                        <ul class="list">
+                                            {preview.iter().map(|(ts, m, v)| {
+                                                let (ts, m, v) = (ts.clone(), m.clone(), *v);
+                                                view! {
+                                                    <li class="row">
+                                                        <span class="row-name">{format!("{m} = {v}")}</span>
+                                                        <span class="row-time">{ts}</span>
+                                                    </li>
+                                                }
+                                            }).collect_view()}
+                                        </ul>
+                                        {parse_errs.iter().take(20).map(|e| {
+                                            let e = e.clone();
+                                            view! { <p class="import-warn">{e}</p> }
+                                        }).collect_view()}
+                                    </div>
+                                }.into_view()
+                            }}
+                            {move || match import_result.get() {
+                                None => view! {}.into_view(),
+                                Some((ins, skip, errs)) => view! {
+                                    <div class="import-result">
+                                        <span class="import-stat ok">{format!("INSERTED {ins}")}</span>
+                                        <span class="import-stat">{format!("SKIPPED {skip}")}</span>
+                                    </div>
+                                    {errs.iter().take(20).map(|e| {
+                                        let e = e.clone();
+                                        view! { <p class="import-warn">{e}</p> }
+                                    }).collect_view()}
+                                }.into_view()
+                            }}
                         </section>
                     }.into_view(),
                     Tab::Skopos => view! {
@@ -1167,6 +1753,323 @@ pub fn App() -> impl IntoView {
             </footer>
         </div>
     }
+}
+
+// ---------------------------------------------------------------------------
+// Nomoi import: client-side parsers for CSV / JSON / GPX exports.
+// Each returns (samples, errors); samples are ready for POST /api/v1/import
+// (canonical metrics, ISO timestamps, canonical units — docs/import-adapter.md).
+// ---------------------------------------------------------------------------
+
+/// Canonical unit for a metric.
+fn unit_for_metric(metric: &str) -> &'static str {
+    match metric {
+        "heart_rate" | "resting_hr" => "bpm",
+        "steps" | "reps" => "count",
+        "active_calories" | "food_kcal" | "resting_kcal" => "kcal",
+        "distance_m" => "m",
+        "active_seconds" | "sleep_seconds" | "restful_sleep_seconds" => "s",
+        "water_ml" => "ml",
+        "protein_g" | "carbs_g" | "fat_g" => "g",
+        "hrv" => "ms",
+        _ => "au",
+    }
+}
+
+fn make_sample(ts: &str, metric: &str, value: f64) -> Value {
+    json!({ "timestamp": ts, "metric": metric, "value": value, "unit": unit_for_metric(metric) })
+}
+
+const IMPORT_PARSE_ERRORS_MAX: usize = 50;
+
+fn push_import_error(errors: &mut Vec<String>, msg: String) {
+    if errors.len() < IMPORT_PARSE_ERRORS_MAX {
+        errors.push(msg);
+    }
+}
+
+/// Read a picked file as UTF-8 text. `Blob::arrayBuffer()` is a native
+/// promise, so no JS closures need outliving the future.
+async fn read_file_text(file: &web_sys::File) -> Result<String, String> {
+    use wasm_bindgen::JsCast;
+    let blob: &web_sys::Blob = file
+        .dyn_ref()
+        .ok_or_else(|| "picked file is not a blob".to_string())?;
+    let buf = wasm_bindgen_futures::JsFuture::from(blob.array_buffer())
+        .await
+        .map_err(|e| format!("could not read file: {e:?}"))?;
+    let bytes: Vec<u8> = js_sys::Uint8Array::new(&buf).to_vec();
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Files selected on a `<input type="file">` change event.
+fn event_target_files(ev: &web_sys::Event) -> Option<Vec<web_sys::File>> {
+    use wasm_bindgen::JsCast;
+    let target: web_sys::EventTarget = ev.target()?;
+    let input: web_sys::HtmlInputElement = target.dyn_into().ok()?;
+    let files = input.files()?;
+    let mut out = Vec::new();
+    for i in 0..files.length() {
+        if let Some(f) = files.item(i) {
+            out.push(f);
+        }
+    }
+    Some(out)
+}
+
+/// CSV header name -> canonical metric (`Some("__ts__")` = the timestamp column).
+fn csv_column_metric(col: &str) -> Option<&'static str> {
+    Some(match col.trim().to_ascii_lowercase().as_str() {
+        "timestamp" | "time" | "date" => "__ts__",
+        "heart_rate" | "heartrate" | "bpm" | "hr" => "heart_rate",
+        "steps" => "steps",
+        "active_calories" | "calories" => "active_calories",
+        "distance_m" | "distance" => "distance_m",
+        "sleep_seconds" => "sleep_seconds",
+        "water_ml" => "water_ml",
+        "protein_g" => "protein_g",
+        "carbs_g" => "carbs_g",
+        "fat_g" => "fat_g",
+        "reps" => "reps",
+        _ => return None,
+    })
+}
+
+fn parse_import_csv(text: &str) -> (Vec<Value>, Vec<String>) {
+    let mut samples = Vec::new();
+    let mut errors = Vec::new();
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let Some(header) = lines.next() else {
+        return (samples, errors);
+    };
+    let cols: Vec<Option<&'static str>> = header.split(',').map(csv_column_metric).collect();
+    let ts_idx = cols.iter().position(|m| matches!(m, Some("__ts__")));
+    for (n, line) in lines.enumerate() {
+        let line_no = n + 2;
+        let cells: Vec<&str> = line.split(',').map(str::trim).collect();
+        if cells.iter().all(|c| c.is_empty()) {
+            continue;
+        }
+        let Some(tsi) = ts_idx else {
+            push_import_error(&mut errors, format!("row {line_no}: no timestamp/time/date column in header"));
+            break;
+        };
+        let ts = cells.get(tsi).copied().unwrap_or("");
+        if ms_from_iso(ts).is_none() {
+            push_import_error(&mut errors, format!("row {line_no}: bad timestamp '{ts}' — row skipped"));
+            continue;
+        }
+        for (i, metric) in cols.iter().enumerate() {
+            let Some(metric) = metric.filter(|m| *m != "__ts__") else {
+                continue;
+            };
+            let cell = cells.get(i).copied().unwrap_or("");
+            if cell.is_empty() {
+                continue;
+            }
+            match cell.parse::<f64>() {
+                Ok(v) if v.is_finite() => samples.push(make_sample(ts, metric, v)),
+                _ => push_import_error(&mut errors, format!("row {line_no}: bad value '{cell}' for {metric}")),
+            }
+        }
+    }
+    (samples, errors)
+}
+
+/// Health Connect `dataType` suffix -> (canonical metric, value fields to
+/// try, most specific first). See docs/import-adapter.md §3.1.
+fn hc_metric_for(ty: &str) -> Option<(&'static str, &'static [&'static str])> {
+    Some(match ty {
+        "heartRate" => ("heart_rate", &["heartRate", "value"]),
+        "restingHeartRate" => ("resting_hr", &["restingHeartRate", "value"]),
+        "stepCount" => ("steps", &["stepCount", "value"]),
+        "distance" => ("distance_m", &["distance", "value"]),
+        "caloriesBurned" | "activeCalories" => ("active_calories", &["value"]),
+        "totalSleep" | "asleep" => ("sleep_seconds", &["sleepDuration", "value"]),
+        "deepAsleep" => ("restful_sleep_seconds", &["sleepDuration", "value"]),
+        "waterIntake" => ("water_ml", &["value"]),
+        _ => return None,
+    })
+}
+
+fn push_json_error(errors: &mut Vec<String>, i: usize, msg: &str) {
+    if errors.len() < IMPORT_PARSE_ERRORS_MAX {
+        errors.push(format!("record {i}: {msg}"));
+    }
+}
+
+fn parse_import_json(text: &str) -> (Vec<Value>, Vec<String>) {
+    let mut samples = Vec::new();
+    let mut errors = Vec::new();
+    let root: Value = match serde_json::from_str(text.trim()) {
+        Ok(v) => v,
+        Err(e) => return (samples, vec![format!("invalid JSON: {e}")]),
+    };
+    let records = if root.is_array() {
+        root.as_array()
+    } else {
+        root.get("samples").and_then(|s| s.as_array())
+    };
+    let Some(records) = records else {
+        return (
+            samples,
+            vec!["expected a JSON array of records or {\"samples\": [...]}" .to_string()],
+        );
+    };
+    for (i, rec) in records.iter().enumerate() {
+        if !rec.is_object() {
+            push_json_error(&mut errors, i, "record is not an object");
+            continue;
+        }
+        let ts = rec
+            .get("timestamp")
+            .or_else(|| rec.get("timeIntervalStart"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        if ms_from_iso(ts).is_none() {
+            push_json_error(&mut errors, i, &format!("missing or bad timestamp '{ts}' — record skipped"));
+            continue;
+        }
+        // Shape 1: {"timestamp","metric","value",...} — already canonical.
+        if let Some(metric) = rec.get("metric").and_then(|m| m.as_str()) {
+            match rec.get("value").and_then(|v| v.as_f64()) {
+                Some(v) if v.is_finite() => {
+                    let unit = rec.get("unit").and_then(|u| u.as_str());
+                    samples.push(json!({ "timestamp": ts, "metric": metric, "value": v, "unit": unit }));
+                }
+                Some(_) => push_json_error(&mut errors, i, &format!("non-finite value for '{metric}'")),
+                None => push_json_error(&mut errors, i, &format!("no numeric value for '{metric}'")),
+            }
+            continue;
+        }
+        // Shape 2: Health Connect records {"timestamp","type","<value field>",...}.
+        let Some(ty) = rec.get("type").and_then(|t| t.as_str()) else {
+            push_json_error(&mut errors, i, "record has neither 'metric' nor 'type'");
+            continue;
+        };
+        let ty = ty.trim().trim_start_matches("health.dataType:");
+        match ty {
+            "foodConsumption" => {
+                let food = rec.get("value");
+                let obj = food.and_then(|v| v.as_object());
+                for (field, metric) in [
+                    ("calories", "food_kcal"),
+                    ("protein", "protein_g"),
+                    ("carbs", "carbs_g"),
+                    ("fat", "fat_g"),
+                ] {
+                    let Some(v) = obj.and_then(|o| o.get(field)).and_then(|x| x.as_f64()) else {
+                        continue;
+                    };
+                    if v.is_finite() {
+                        samples.push(make_sample(ts, metric, v));
+                    }
+                }
+            }
+            // No canonical home — dropped silently, per the adapter doc.
+            "lightAsleep" | "exerciseState" => {}
+            _ => match hc_metric_for(ty) {
+                Some((metric, fields)) => {
+                    let value = fields.iter().find_map(|f| rec.get(*f)).and_then(|v| v.as_f64());
+                    match value {
+                        Some(v) if v.is_finite() => samples.push(make_sample(ts, metric, v)),
+                        Some(_) => push_json_error(&mut errors, i, &format!("non-finite value for '{ty}'")),
+                        None => {} // field absent: emit nothing, never 0
+                    }
+                }
+                None => push_json_error(&mut errors, i, &format!("unknown type '{ty}'")),
+            },
+        }
+    }
+    (samples, errors)
+}
+
+/// Attribute value from a small `<trkpt .../>` tag (quoted, optional spaces).
+fn gpx_attr<'a>(tag: &'a str, key: &str) -> Option<&'a str> {
+    let mut from = 0usize;
+    while let Some(rel) = tag[from..].find(key) {
+        let start = from + rel;
+        let before_ok = start == 0
+            || tag[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_whitespace() || c == '/');
+        let after = tag[start + key.len()..].trim_start();
+        if before_ok {
+            if let Some(eq) = after.find('=') {
+                let val = after[eq + 1..].trim_start();
+                if let Some(q) = val.chars().next() {
+                    if q == '"' || q == '\'' {
+                        let rest = &val[1..];
+                        if let Some(end) = rest.find(q) {
+                            return Some(&rest[..end]);
+                        }
+                    }
+                }
+            }
+        }
+        from = start + key.len();
+    }
+    None
+}
+
+fn gpx_child<'a>(body: &'a str, name: &str) -> Option<&'a str> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let i = body.find(&open)?;
+    let rest = &body[i + open.len()..];
+    let j = rest.find(&close)?;
+    Some(&rest[..j])
+}
+
+fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    const R: f64 = 6_371_000.0;
+    let dlat = (lat2 - lat1).to_radians();
+    let dlon = (lon2 - lon1).to_radians();
+    let a = (dlat / 2.0).sin().powi(2)
+        + lat1.to_radians().cos() * lat2.to_radians().cos() * (dlon / 2.0).sin().powi(2);
+    2.0 * R * a.sqrt().asin()
+}
+
+fn parse_import_gpx(text: &str) -> (Vec<Value>, Vec<String>) {
+    let mut samples = Vec::new();
+    let mut errors = Vec::new();
+    let mut last: Option<(f64, f64)> = None;
+    let mut from = 0;
+    while let Some(rel) = text[from..].find("<trkpt") {
+        let start = from + rel;
+        let Some(gt) = text[start..].find('>') else {
+            break;
+        };
+        let tag = &text[start..start + gt];
+        from = start + gt + 1;
+        if tag.trim_end().ends_with("/>") {
+            continue; // self-closing: no <time> child
+        }
+        let Some(close) = text[from..].find("</trkpt>") else {
+            break;
+        };
+        let body = &text[from..from + close];
+        from += close;
+        let time = gpx_child(body, "time").map(str::trim).unwrap_or("");
+        if time.is_empty() {
+            continue; // point without time: skip
+        }
+        if ms_from_iso(time).is_none() {
+            push_import_error(&mut errors, format!("trkpt: bad time '{time}' — point skipped"));
+            continue;
+        }
+        let lat = gpx_attr(tag, "lat").and_then(|s| s.parse::<f64>().ok());
+        let lon = gpx_attr(tag, "lon").and_then(|s| s.parse::<f64>().ok());
+        if let (Some(lat), Some(lon)) = (lat, lon) {
+            if let Some((plat, plon)) = last {
+                samples.push(make_sample(time, "distance_m", haversine_m(plat, plon, lat, lon)));
+            }
+            samples.push(make_sample(time, "active_seconds", 1.0));
+            last = Some((lat, lon));
+        }
+    }
+    (samples, errors)
 }
 
 /// Select value for the type picker ("" = Undefined).
@@ -1489,6 +2392,11 @@ fn SessionDetails(
 ) -> impl IntoView {
     let is_active = session.status == "active";
     let id = session.id.clone();
+    // Shared read handles so the per-row closures below can clone the
+    // connection strings without moving them out of a multi-call Fn scope.
+    let (base_r, _base_w) = create_signal(base.clone());
+    let (token_r, _token_w) = create_signal(token.clone());
+    let (sid_r, _sid_w) = create_signal(id.clone());
     let (type_id, set_type_id) = create_signal(session.type_id.clone().unwrap_or_default());
 
     // Type name + swatch, kept live against the type dictionary.
@@ -1513,18 +2421,101 @@ fn SessionDetails(
     };
 
     // Stats: fetched on open (the panel is keyed by session id, so this
-    // runs once per selection).
+    // runs once per selection) and re-fetched after manual-set mutations,
+    // so the SETS / TOTAL REPS / VOLUME chips stay current.
     let (stats, set_stats) = create_signal(None::<SessionStats>);
     let (stats_error, set_stats_error) = create_signal(None::<String>);
     let (loading, set_loading) = create_signal(true);
-    let sid_fetch = id.clone();
-    spawn_local(async move {
-        match fetch_session_stats(&base, &token, &sid_fetch).await {
-            Ok(s) => set_stats.set(Some(s)),
-            Err(e) => set_stats_error.set(Some(e)),
+
+    // Manual exercise sets: loaded with the stats; re-fetched after every
+    // mutation (a PATCH rewrites the set rows, changing the exercise ids,
+    // so the For below re-keys rows and drafts re-sync from the server).
+    let (exercises, set_exercises) = create_signal(None::<Vec<Exercise>>);
+    let (ex_error, set_ex_error) = create_signal(None::<String>);
+    let (ex_loading, set_ex_loading) = create_signal(true);
+
+    // Re-pull stats + exercises after any manual-set change.
+    let refresh_ex = {
+        let base = base.clone();
+        let token = token.clone();
+        let sid = id.clone();
+        move || {
+            let (b, t, s) = (base.clone(), token.clone(), sid.clone());
+            spawn_local(async move {
+                match fetch_session_stats(&b, &t, &s).await {
+                    Ok(st) => {
+                        set_stats.set(Some(st));
+                        set_stats_error.set(None);
+                    }
+                    Err(e) => set_stats_error.set(Some(e)),
+                }
+                set_loading.set(false);
+            });
+            let (b, t, s) = (base.clone(), token.clone(), sid.clone());
+            spawn_local(async move {
+                match fetch_exercises(&b, &t, &s).await {
+                    Ok(list) => set_exercises.set(Some(list)),
+                    Err(e) => set_ex_error.set(Some(e)),
+                }
+                set_ex_loading.set(false);
+            });
         }
-        set_loading.set(false);
-    });
+    };
+    refresh_ex();
+    let on_ex_saved = Callback::new(move |_| refresh_ex());
+
+    // DELETE EXERCISE: rows report the id; the delete + refresh happen
+    // here, next to every other session mutation.
+    let on_delete_exercise = {
+        let base = base.clone();
+        let token = token.clone();
+        let sid = id.clone();
+        let on_saved = on_ex_saved.clone();
+        Callback::new(move |eid: String| {
+            let (b, t, s) = (base.clone(), token.clone(), sid.clone());
+            let saved = on_saved.clone();
+            spawn_local(async move {
+                let _ = delete_exercise(&b, &t, &s, &eid).await;
+                saved.call(());
+            });
+        })
+    };
+
+    // ADD EXERCISE: one initial set (setNumber 1); the rest are edited
+    // per row.
+    let (new_name, set_new_name) = create_signal(String::new());
+    let (new_reps, set_new_reps) = create_signal(String::new());
+    let (new_weight, set_new_weight) = create_signal(String::new());
+    let (adding, set_adding) = create_signal(false);
+    let on_add_exercise = {
+        let base = base.clone();
+        let token = token.clone();
+        let sid = id.clone();
+        let on_saved = on_ex_saved.clone();
+        move |_| {
+            let name = new_name.get().trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            set_adding.set(true);
+            let reps = new_reps.get().trim().parse::<i32>().unwrap_or(0);
+            let weight = new_weight.get().trim().parse::<f64>().ok();
+            let body = json!({
+                "name": name,
+                "sets": [{ "setNumber": 1, "reps": reps, "weightKg": weight, "restSec": null }],
+            });
+            let (b, t, s) = (base.clone(), token.clone(), sid.clone());
+            let saved = on_saved.clone();
+            spawn_local(async move {
+                let _ = add_exercise(&b, &t, &s, &body).await;
+                set_adding.set(false);
+                set_new_name.set(String::new());
+                set_new_reps.set(String::new());
+                set_new_weight.set(String::new());
+                saved.call(());
+            });
+        }
+    };
 
     let start_label = ms_from_iso(&session.start_time)
         .map(fmt_time)
@@ -1592,10 +2583,59 @@ fn SessionDetails(
                                 <span class="kpi-label">"PEAK HR"</span>
                                 <div class="kpi-value">{format!("{}", st.peak_hr)}<span class="unit">"BPM"</span></div>
                             </div>
+                            <div class="kpi-chip">
+                                <span class="kpi-label">"SETS"</span>
+                                <div class="kpi-value">{format!("{}", st.sets)}</div>
+                            </div>
+                            <div class="kpi-chip">
+                                <span class="kpi-label">"TOTAL REPS"</span>
+                                <div class="kpi-value">{format!("{}", st.total_reps)}</div>
+                            </div>
+                            <div class="kpi-chip">
+                                <span class="kpi-label">"VOLUME"</span>
+                                <div class="kpi-value">{format!("{:.0}", st.volume_kg)}<span class="unit">"KG"</span></div>
+                            </div>
                         </div>
                     }
                 }}
             </Show>
+            <div style="flex:1 1 100%; display:flex; flex-direction:column; gap:8px; margin-top:14px; padding-top:14px; border-top:1px solid var(--line);">
+                <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                    <span class="muted" style="font-size:10px; letter-spacing:0.22em;">"EXERCISES"</span>
+                    <Show when=move || ex_loading.get() fallback=|| ()>
+                        <span class="muted">"LOADING…"</span>
+                    </Show>
+                    <Show when=move || ex_error.get().is_some() fallback=|| ()>
+                        {move || format!("UNAVAILABLE — {}", ex_error.get().unwrap_or_default())}
+                    </Show>
+                    <Show when=move || exercises.get().as_ref().is_some_and(Vec::is_empty) fallback=|| ()>
+                        <span class="muted">"NO MANUAL SETS YET"</span>
+                    </Show>
+                </div>
+                <For each=move || exercises.get().unwrap_or_default() key=|e| e.id.clone() let:e>
+                    {move || {
+                        let e = e.clone();
+                        let base = base_r.get();
+                        let token = token_r.get();
+                        let sid = sid_r.get();
+                        view! {
+                            <ExerciseRow ex=e base=base token=token session_id=sid on_saved=on_ex_saved on_delete=on_delete_exercise />
+                        }
+                    }}
+                </For>
+                <div style="display:flex; align-items:flex-end; gap:8px; flex-wrap:wrap;">
+                    <label class="ctl">"EXERCISE"
+                        <input placeholder="e.g. SQUAT" style="min-width:160px" prop:value=new_name on:input=move |ev| set_new_name.set(event_target_value(&ev)) />
+                    </label>
+                    <label class="ctl">"REPS"
+                        <input placeholder="0" style="min-width:64px" prop:value=new_reps on:input=move |ev| set_new_reps.set(event_target_value(&ev)) />
+                    </label>
+                    <label class="ctl">"WEIGHT KG"
+                        <input placeholder="—" style="min-width:80px" prop:value=new_weight on:input=move |ev| set_new_weight.set(event_target_value(&ev)) />
+                    </label>
+                    <button class="btn" disabled=move || adding.get() on:click=on_add_exercise>"ADD EXERCISE"</button>
+                </div>
+            </div>
             <label class="ctl">"TYPE"
                 <select prop:value=type_id on:change=move |ev| {
                     let v = event_target_value(&ev);
@@ -1624,6 +2664,189 @@ fn SessionDetails(
             {is_active.then(|| view! {
                 <button class="btn" on:click=move |_| on_close.call(id_close.clone())>"CLOSE NOW"</button>
             })}
+        </div>
+    }
+}
+
+/// Which raw input field of a set row to write. Drafts keep strings so
+/// the inputs echo exactly what was typed; numbers parse only on SAVE.
+#[derive(Clone, Copy)]
+enum SetField {
+    Reps,
+    Weight,
+    Rest,
+}
+
+/// One draft set: set number plus raw input strings for reps/weight/rest.
+#[derive(Debug, Clone, PartialEq)]
+struct SetDraft {
+    set_number: i32,
+    reps: String,
+    weight: String,
+    rest: String,
+}
+
+/// One exercise group with inline per-set editing. The draft is local;
+/// SAVE PATCHes the name plus the whole sets array, DISCARD restores
+/// the loaded values. The parent re-fetches the list after each
+/// mutation, so this row (keyed by exercise id) always re-syncs from
+/// the server and can never hold a stale draft.
+#[component]
+fn ExerciseRow(
+    ex: Exercise,
+    base: String,
+    token: String,
+    session_id: String,
+    on_saved: Callback<()>,
+    on_delete: Callback<String>,
+) -> impl IntoView {
+    let to_draft = |s: &ExerciseSet| SetDraft {
+        set_number: s.set_number,
+        reps: s.reps.to_string(),
+        weight: s.weight_kg.map(|w| format!("{w}")).unwrap_or_default(),
+        rest: s.rest_sec.map(|r| r.to_string()).unwrap_or_default(),
+    };
+    let orig_name = ex.name.clone();
+    let orig_sets: Vec<SetDraft> = ex.sets.iter().map(to_draft).collect();
+    let (name, set_name) = create_signal(ex.name.clone());
+    let (sets, set_sets) = create_signal(ex.sets.iter().map(to_draft).collect::<Vec<_>>());
+    let (dirty, set_dirty) = create_signal(false);
+    let (saving, set_saving) = create_signal(false);
+    let (save_error, set_save_error) = create_signal(None::<String>);
+
+    // Write one raw field of one set, looked up by set number. Kept as a
+    // Callback (Copy) so each per-set input handler captures its own copy;
+    // a bare closure value could only be moved into one of them.
+    let patch_set = Callback::new(move |(num, field, v): (i32, SetField, String)| {
+        set_save_error.set(None);
+        set_sets.update(|sets| {
+            if let Some(s) = sets.iter_mut().find(|s| s.set_number == num) {
+                match field {
+                    SetField::Reps => s.reps = v,
+                    SetField::Weight => s.weight = v,
+                    SetField::Rest => s.rest = v,
+                }
+            }
+        });
+        set_dirty.set(true);
+    });
+
+    let on_name = move |ev: web_sys::Event| {
+        set_save_error.set(None);
+        set_name.set(event_target_value(&ev));
+        set_dirty.set(true);
+    };
+
+    // Append an empty set numbered max+1 (draft; persisted with the row).
+    let on_add_set = move |_| {
+        set_save_error.set(None);
+        set_sets.update(|sets| {
+            let next = sets.iter().map(|s| s.set_number).max().unwrap_or(0) + 1;
+            sets.push(SetDraft {
+                set_number: next,
+                reps: String::new(),
+                weight: String::new(),
+                rest: String::new(),
+            });
+        });
+        set_dirty.set(true);
+    };
+
+    let on_delete_set = Callback::new(move |num: i32| {
+        set_save_error.set(None);
+        set_sets.update(|sets| sets.retain(|s| s.set_number != num));
+        set_dirty.set(true);
+    });
+
+    let orig_name = orig_name.clone();
+    let orig_sets = orig_sets.clone();
+    let on_discard = Callback::new(move |_: ()| {
+        set_name.set(orig_name.clone());
+        set_sets.set(orig_sets.clone());
+        set_dirty.set(false);
+        set_save_error.set(None);
+    });
+
+    let eid_save = ex.id.clone();
+    let eid_del = ex.id.clone();
+    let base = base.clone();
+    let token = token.clone();
+    let session_id = session_id.clone();
+    let on_save = move |_| {
+        set_dirty.set(false);
+        set_saving.set(true);
+        let name = name.get();
+        let sets_json: Vec<Value> = sets
+            .get()
+            .iter()
+            .map(|s| {
+                json!({
+                    "setNumber": s.set_number,
+                    "reps": s.reps.trim().parse::<i32>().unwrap_or(0),
+                    "weightKg": s.weight.trim().parse::<f64>().ok(),
+                    "restSec": s.rest.trim().parse::<i32>().ok(),
+                })
+            })
+            .collect();
+        let body = json!({ "name": name, "sets": sets_json });
+        let (b, t, s, e) = (base.clone(), token.clone(), session_id.clone(), eid_save.clone());
+        spawn_local(async move {
+            let res = update_exercise(&b, &t, &s, &e, &body).await;
+            set_saving.set(false);
+            match res {
+                Ok(_) => on_saved.call(()),
+                Err(e) => set_save_error.set(Some(e)),
+            }
+        });
+    };
+
+    let on_exercise_delete = move |_| on_delete.call(eid_del.clone());
+
+    view! {
+        <div style="display:flex; flex-direction:column; gap:6px; border:1px solid var(--line); background:var(--panel); padding:10px 12px;">
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <input placeholder="EXERCISE" style="flex:1; min-width:140px" prop:value=name on:input=on_name />
+                <Show when=move || dirty.get() fallback=|| ()>
+                    <span class="muted">"● UNSAVED"</span>
+                </Show>
+                <button class="btn small" disabled=move || saving.get() || !dirty.get() on:click=on_save>
+                    {move || if saving.get() { "SAVING…" } else { "SAVE" }}
+                </button>
+                <Show when=move || dirty.get() fallback=|| ()>
+                    <button class="btn small" on:click=move |_| on_discard.call(())>"DISCARD"</button>
+                </Show>
+                <button class="btn small" on:click=on_add_set>"ADD SET"</button>
+                <button class="btn small danger" on:click=on_exercise_delete>"DELETE"</button>
+            </div>
+            <For each=move || sets.get() key=|s| s.set_number let:s>
+                {move || {
+                    let num = s.set_number;
+                    view! {
+                        <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                            <span class="muted" style="min-width:48px;">{format!("SET {num}")}</span>
+                            <input style="width:64px; min-width:0;" placeholder="REPS"
+                                   prop:value=move || sets.get().iter().find(|x| x.set_number == num).map(|x| x.reps.clone()).unwrap_or_default()
+                                   on:input=move |ev| patch_set.call((num, SetField::Reps, event_target_value(&ev))) />
+                            <span class="muted">"×"</span>
+                            <input style="width:76px; min-width:0;" placeholder="KG"
+                                   prop:value=move || sets.get().iter().find(|x| x.set_number == num).map(|x| x.weight.clone()).unwrap_or_default()
+                                   on:input=move |ev| patch_set.call((num, SetField::Weight, event_target_value(&ev))) />
+                            <span class="muted">"KG"</span>
+                            <span class="muted">"REST"</span>
+                            <input style="width:64px; min-width:0;" placeholder="S"
+                                   prop:value=move || sets.get().iter().find(|x| x.set_number == num).map(|x| x.rest.clone()).unwrap_or_default()
+                                   on:input=move |ev| patch_set.call((num, SetField::Rest, event_target_value(&ev))) />
+                            <span class="muted">"S"</span>
+                            <Show when=move || (sets.get().len() > 1) fallback=|| ()>
+                                <button class="btn small danger" title="DELETE SET" on:click=move |_| on_delete_set.call(num)>{"✕"}</button>
+                            </Show>
+                        </div>
+                    }
+                }}
+            </For>
+            <Show when=move || save_error.get().is_some() fallback=|| ()>
+                {move || format!("SAVE FAILED — {}", save_error.get().unwrap_or_default())}
+            </Show>
         </div>
     }
 }

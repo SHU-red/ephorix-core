@@ -22,6 +22,11 @@ pub const METRIC_MOVEMENT_INTENSITY: &str = "movement_intensity";
 pub const METRIC_REPS: &str = "reps";
 pub const METRIC_WATER_ML: &str = "water_ml";
 pub const METRIC_FOOD_KCAL: &str = "food_kcal";
+pub const METRIC_HRV: &str = "hrv";
+pub const METRIC_RESTING_HR: &str = "resting_hr";
+pub const METRIC_PROTEIN_G: &str = "protein_g";
+pub const METRIC_CARBS_G: &str = "carbs_g";
+pub const METRIC_FAT_G: &str = "fat_g";
 
 /// One normalized value.
 #[derive(Debug, Clone)]
@@ -72,6 +77,53 @@ pub async fn insert_measurements(
     }
     tx.commit().await?;
     Ok(rows.len())
+}
+
+/// True when `metric` is one of the canonical metric names. This is the
+/// single gate the import endpoint uses to decide what the normalized store
+/// will accept.
+pub fn is_canonical_metric(metric: &str) -> bool {
+    metric == METRIC_HEART_RATE
+        || metric == METRIC_STEPS
+        || metric == METRIC_ACTIVE_CALORIES
+        || metric == METRIC_SLEEP_SECONDS
+        || metric == METRIC_RESTFUL_SLEEP_SECONDS
+        || metric == METRIC_DISTANCE_M
+        || metric == METRIC_ACTIVE_SECONDS
+        || metric == METRIC_RESTING_KCAL
+        || metric == METRIC_MOVEMENT_INTENSITY
+        || metric == METRIC_REPS
+        || metric == METRIC_WATER_ML
+        || metric == METRIC_FOOD_KCAL
+        || metric == METRIC_HRV
+        || metric == METRIC_RESTING_HR
+        || metric == METRIC_PROTEIN_G
+        || metric == METRIC_CARBS_G
+        || metric == METRIC_FAT_G
+}
+
+/// Generic import adapter: validates one flat, timestamped sample from any
+/// source adapter (see `docs/import-adapter.md` for the field mappings).
+/// Returns `None` when the metric is not canonical or the value is not
+/// finite — the importer counts those as skipped. `source`, `device_id`,
+/// and `meta` are carried through for source-specific unit coercion as the
+/// vocabulary grows; today they are not stored on the measurement.
+pub fn normalize_import(
+    ts: DateTime<Utc>,
+    source: &str,
+    device_id: Option<&str>,
+    metric: &str,
+    value: f64,
+    unit: Option<&str>,
+    meta: Option<&serde_json::Value>,
+) -> Option<Measurement> {
+    let _ = (source, device_id, meta);
+    let metric = metric.trim();
+    if !is_canonical_metric(metric) || !value.is_finite() {
+        return None;
+    }
+    let unit = unit.map(str::trim).unwrap_or("");
+    Some(Measurement::new(ts, metric, value, unit))
 }
 
 /// Pebble adapter: maps a PebbleKit health snapshot to canonical metrics.

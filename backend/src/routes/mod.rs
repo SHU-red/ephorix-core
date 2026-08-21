@@ -3,6 +3,7 @@ pub mod agoge_types;
 pub mod ai;
 pub mod events;
 pub mod health;
+pub mod import;
 pub mod ingest;
 pub mod metrics;
 pub mod nutrition;
@@ -72,6 +73,14 @@ pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
             "/api/v1/agoge-sessions/{id}/stats",
             get(agoge_sessions::stats),
         )
+        .route(
+            "/api/v1/agoge-sessions/{id}/exercises",
+            get(agoge_sessions::exercises).post(agoge_sessions::add_exercise),
+        )
+        .route(
+            "/api/v1/agoge-sessions/{id}/exercises/{eid}",
+            patch(agoge_sessions::update_exercise).delete(agoge_sessions::delete_exercise),
+        )
         .route("/api/v1/timeline", get(timeline::get_timeline))
         .route(
             "/api/v1/settings",
@@ -79,10 +88,12 @@ pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
         )
         .route("/api/v1/ingest", post(ingest::ingest))
         .route("/api/v1/measurements", get(ingest::list_measurements))
+        .route("/api/v1/import", post(import::import))
         .route(
             "/api/v1/nutrition",
             get(nutrition::list_nutrition).post(nutrition::add_nutrition),
         )
+        .route("/api/v1/nutrition/daily", get(nutrition::daily))
         .route(
             "/api/v1/metrics/body-battery",
             get(metrics::body_battery),
@@ -91,6 +102,11 @@ pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
             "/api/v1/metrics/body-battery-series",
             get(metrics::body_battery_series),
         )
+        .route(
+            "/api/v1/metrics/baselines",
+            get(metrics::baselines),
+        )
+        .route("/api/v1/metrics/readiness", get(metrics::readiness))
         .route("/api/v1/metrics/workouts", get(metrics::workouts))
         .route(
             "/api/v1/metrics/workouts/{id}/accept",

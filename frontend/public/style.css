@@ -242,6 +242,35 @@ select { min-width: 120px; }
 
 @media (max-width: 720px) { .kpi { grid-template-columns: repeat(2, 1fr); } }
 
+/* ---------------- Readiness (Anapavsis) ---------------- */
+
+.readiness-layout { display: grid; grid-template-columns: 200px 1fr; gap: 24px; align-items: center; }
+@media (max-width: 720px) { .readiness-layout { grid-template-columns: 1fr; } }
+.readiness-ring-col { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.readiness-ring { position: relative; width: 200px; height: 200px; }
+.ring-svg { width: 100%; height: 100%; display: block; }
+.ring-track { stroke: var(--line); }
+.ring-arc { stroke: var(--red); filter: drop-shadow(0 0 6px var(--glow)); transition: stroke-dasharray 0.5s ease; }
+.ring-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.ring-score { font-family: "Anton", "Arial Narrow", sans-serif; font-size: 56px; line-height: 1; color: var(--text); }
+.ring-max { margin-top: 4px; font-size: 10px; letter-spacing: 0.24em; color: var(--muted); }
+.ring-date { font-size: 10px; letter-spacing: 0.18em; color: var(--dim); font-family: "IBM Plex Mono", ui-monospace, monospace; }
+
+.readiness-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.readiness-component { display: flex; flex-direction: column; gap: 4px; }
+.rc-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 11px; letter-spacing: 0.1em; }
+.rc-label { color: var(--muted); }
+.rc-value { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+.readiness-component.gain .bar-fill { background: var(--red); }
+.readiness-component.drain .bar-fill { background: var(--red-dark); }
+
+.readiness-trend { margin-top: 2px; }
+.trend-caption { font-size: 10px; letter-spacing: 0.18em; color: var(--dim); margin-bottom: 6px; }
+.trend-svg { width: 100%; height: 64px; display: block; }
+.trend-bar { fill: var(--red); opacity: 0.7; }
+.trend-bar:hover { opacity: 1; }
+.trend-bar.today { fill: var(--red-bright); opacity: 1; }
+
 /* ---------------- Timeline ---------------- */
 
 .chart { width: 100%; }
@@ -529,3 +558,56 @@ footer {
 .footer-mark { width: 16px; height: 16px; display: inline-flex; }
 .footer-mark svg { width: 100%; height: 100%; }
 .footer-motto { color: var(--red-dark); letter-spacing: 0.5em; font-size: 11px; margin-top: 4px; }
+
+/* ---------------- Syssitia (nutrition) ---------------- */
+
+.nut-nav { display: flex; gap: 8px; align-items: center; }
+.nut-date {
+  color: var(--red-bright);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  min-width: 96px;
+  text-align: center;
+}
+.nut-bars { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.nut-row { display: grid; grid-template-columns: 92px 1fr 108px; gap: 12px; align-items: center; }
+.nut-label { font-size: 10px; letter-spacing: 0.18em; color: var(--muted); }
+.nut-num { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--text); text-align: right; }
+@media (max-width: 640px) { .nut-row { grid-template-columns: 70px 1fr 88px; } }
+
+/* ---------------- Nomoi (import) ---------------- */
+
+.import-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.import-panel input[type="file"] {
+  min-width: 240px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.import-panel input[type="file"]::file-selector-button {
+  background: #000;
+  color: var(--red);
+  border: 1px solid var(--red-dark);
+  padding: 5px 12px;
+  font-family: "Anton", "Arial Narrow", sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  margin-right: 10px;
+  cursor: pointer;
+}
+.import-panel input[type="file"]::file-selector-button:hover { background: var(--red); color: #000; }
+.import-preview { border: 1px solid var(--line); background: #070707; padding: 10px 12px; margin-top: 12px; }
+.import-preview .list { max-height: 220px; overflow-y: auto; }
+.import-warn { color: var(--red-bright); font-size: 11px; margin-top: 6px; overflow-wrap: anywhere; }
+.import-result { display: flex; gap: 10px; margin-top: 12px; }
+.import-stat {
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  padding: 6px 12px;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+.import-stat.ok { border-color: var(--red-dark); color: var(--red-bright); background: var(--red-deep); }

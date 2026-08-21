@@ -90,6 +90,9 @@ pub struct SessionStats {
     pub calories: f64,
     pub avg_hr: f64,
     pub peak_hr: i64,
+    pub sets: i64,
+    pub total_reps: i64,
+    pub volume_kg: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +275,54 @@ pub async fn fetch_session_stats(base: &str, token: &str, id: &str) -> Result<Se
     serde_json::from_value(v).map_err(|e| format!("stats decode: {e}"))
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExerciseSet {
+    pub id: String,
+    pub set_number: i32,
+    pub reps: i32,
+    pub weight_kg: Option<f64>,
+    pub rest_sec: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Exercise {
+    pub id: String,
+    pub name: String,
+    pub sets: Vec<ExerciseSet>,
+}
+
+pub async fn fetch_exercises(base: &str, token: &str, session_id: &str) -> Result<Vec<Exercise>, String> {
+    let v = Request::get(&format!("{base}/api/v1/agoge-sessions/{session_id}/exercises"))
+        .header("X-EphoriX-Token", token)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("invalid json: {e}"))?;
+    serde_json::from_value(v["exercises"].clone()).map_err(|e| format!("exercises decode: {e}"))
+}
+
+pub async fn add_exercise(base: &str, token: &str, session_id: &str, body: &Value) -> Result<Value, String> {
+    post_json(base, token, &format!("/api/v1/agoge-sessions/{session_id}/exercises"), body).await
+}
+
+pub async fn update_exercise(
+    base: &str,
+    token: &str,
+    session_id: &str,
+    exercise_id: &str,
+    body: &Value,
+) -> Result<Value, String> {
+    patch_json(base, token, &format!("/api/v1/agoge-sessions/{session_id}/exercises/{exercise_id}"), body).await
+}
+
+pub async fn delete_exercise(base: &str, token: &str, session_id: &str, exercise_id: &str) -> Result<Value, String> {
+    delete_json(base, token, &format!("/api/v1/agoge-sessions/{session_id}/exercises/{exercise_id}")).await
+}
+
 pub async fn parse_ai(base: &str, token: &str, text: &str) -> Result<Value, String> {
     post_json(base, token, "/api/v1/ai/parse", &json!({ "text": text })).await
 }
@@ -336,4 +387,165 @@ pub async fn fetch_body_battery_series(
         .await
         .map_err(|e| format!("invalid json: {e}"))?;
     serde_json::from_value(v["series"].clone()).map_err(|e| format!("series decode: {e}"))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadinessComponent {
+    pub key: String,
+    pub label: String,
+    pub value: f64,
+    pub max: f64,
+    pub direction: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadinessDay {
+    pub date: String,
+    pub score: f64,
+    pub recharge: f64,
+    pub stress_drain: f64,
+    pub activity_drain: f64,
+    pub resting_hr: Option<f64>,
+    pub hrv: Option<f64>,
+    pub components: Vec<ReadinessComponent>,
+}
+
+pub async fn fetch_readiness(
+    base: &str,
+    token: &str,
+    from_ms: f64,
+    to_ms: f64,
+) -> Result<Vec<ReadinessDay>, String> {
+    let from = iso_from_ms(from_ms);
+    let to = iso_from_ms(to_ms);
+    let v = Request::get(&format!("{base}/api/v1/metrics/readiness"))
+        .header("X-EphoriX-Token", token)
+        .query([("from", from.as_str()), ("to", to.as_str())])
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("invalid json: {e}"))?;
+    serde_json::from_value(v["days"].clone()).map_err(|e| format!("readiness decode: {e}"))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BaselinePercentile {
+    pub p10: f64,
+    pub p50: f64,
+    pub p90: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Baselines {
+    pub resting_hr: Option<BaselinePercentile>,
+    pub stress: Option<BaselinePercentile>,
+    pub battery: Option<BaselinePercentile>,
+}
+
+pub async fn fetch_baselines(base: &str, token: &str) -> Result<Baselines, String> {
+    let v = Request::get(&format!("{base}/api/v1/metrics/baselines"))
+        .header("X-EphoriX-Token", token)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("invalid json: {e}"))?;
+    serde_json::from_value(v).map_err(|e| format!("baselines decode: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Nutrition daily log
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NutritionMeal {
+    pub id: String,
+    /// water | food | meal (meal = food entry with a meal type)
+    pub r#type: String,
+    pub meal_type: Option<String>,
+    /// kcal for food/meal, ml for water
+    pub amount: f64,
+    pub protein: f64,
+    pub carbs: f64,
+    pub fat: f64,
+    pub note: Option<String>,
+    pub consumed_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NutritionDaily {
+    pub date: String,
+    pub kcal: f64,
+    pub protein: f64,
+    pub carbs: f64,
+    pub fat: f64,
+    pub water_ml: f64,
+    pub water_goal_ml: f64,
+    pub meals: Vec<NutritionMeal>,
+}
+
+pub async fn fetch_daily_nutrition(
+    base: &str,
+    token: &str,
+    date_iso: &str,
+) -> Result<NutritionDaily, String> {
+    let v = Request::get(&format!("{base}/api/v1/nutrition/daily"))
+        .header("X-EphoriX-Token", token)
+        .query([("date", date_iso)])
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("invalid json: {e}"))?;
+    serde_json::from_value(v).map_err(|e| format!("nutrition decode: {e}"))
+}
+
+/// POST /api/v1/nutrition. `body` must carry `kind` ("water" | "food"),
+/// `amount`, and optionally protein/carbs/fat (g), `mealType` (marks a food
+/// entry as a meal), `note`, `consumedAt`.
+pub async fn add_nutrition(base: &str, token: &str, body: &Value) -> Result<Value, String> {
+    post_json(base, token, "/api/v1/nutrition", body).await
+}
+
+// ---------------------------------------------------------------------------
+// Generic import (CSV / JSON / GPX exports flattened to canonical samples)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResult {
+    pub inserted: usize,
+    pub skipped: usize,
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+/// POST /api/v1/import. `source` must be one of: csv, gpx, health_connect,
+/// apple_health, garmin, manual, pebble, fitbit. `samples` are already
+/// canonical ({timestamp, metric, value, unit?, meta?}); invalid ones are
+/// skipped per-sample and reported in `errors` (capped at 20).
+pub async fn import_samples(
+    base: &str,
+    token: &str,
+    source: &str,
+    device_id: Option<&str>,
+    samples: &[Value],
+) -> Result<ImportResult, String> {
+    let body = json!({
+        "source": source,
+        "deviceId": device_id,
+        "samples": samples,
+    });
+    let v = post_json(base, token, "/api/v1/import", &body).await?;
+    serde_json::from_value(v).map_err(|e| format!("import decode: {e}"))
 }
