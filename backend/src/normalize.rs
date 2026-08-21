@@ -49,6 +49,12 @@ impl Measurement {
 }
 
 /// Inserts a batch of normalized measurements in a single transaction.
+///
+/// Deduplication is enforced by the unique index `(user_id, metric, ts)`
+/// (see migration 0010): a row that already exists for the same user, metric
+/// and timestamp is skipped via `ON CONFLICT DO NOTHING`, so re-pushing the
+/// same batch never duplicates data. Returns the number of rows actually
+/// inserted (from the Postgres rows-affected counts), not the input length.
 pub async fn insert_measurements(
     pool: &PgPool,
     user_id: Uuid,
@@ -60,10 +66,12 @@ pub async fn insert_measurements(
         return Ok(0);
     }
     let mut tx = pool.begin().await?;
+    let mut inserted = 0usize;
     for r in rows {
-        sqlx::query(
+        let res = sqlx::query(
             "INSERT INTO measurements (ts, user_id, source, device_id, metric, value, unit)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (user_id, metric, ts) DO NOTHING",
         )
         .bind(r.ts)
         .bind(user_id)
@@ -74,9 +82,10 @@ pub async fn insert_measurements(
         .bind(&r.unit)
         .execute(&mut *tx)
         .await?;
+        inserted += res.rows_affected() as usize;
     }
     tx.commit().await?;
-    Ok(rows.len())
+    Ok(inserted)
 }
 
 /// True when `metric` is one of the canonical metric names. This is the

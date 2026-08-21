@@ -6,6 +6,8 @@ use leptos::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use gloo_net::http::Request;
+
 use crate::api::*;
 use crate::icons::{glyph_svg, GLYPH_KEYS, LAMBDA};
 use crate::timeline::{SeriesConfig, TimelineChart};
@@ -17,6 +19,26 @@ struct StoredSettings {
     series: Option<SeriesConfig>,
     #[serde(default)]
     range_days: Option<i64>,
+}
+
+/// Build provenance baked into the image by scripts/publish.sh
+/// (frontend/version.json) — shown in the footer when present.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionInfo {
+    sha: String,
+    #[serde(default)]
+    branch: String,
+    #[serde(default)]
+    built_at: String,
+}
+
+/// "2026-08-21T12:34:56Z" -> "2026-08-21 12:34 UTC".
+fn fmt_built_at(iso: &str) -> String {
+    match iso.split_once('T') {
+        Some((date, time)) => format!("{date} {} UTC", &time[..time.len().min(5)]),
+        None => iso.to_string(),
+    }
 }
 
 /// Time-range presets for the timeline buttons (label, days).
@@ -459,6 +481,8 @@ pub fn App() -> impl IntoView {
     let (ai_provider, set_ai_provider) = create_signal("llamacpp".to_string());
     let (ai_testing, set_ai_testing) = create_signal(false);
     let (ai_test_result, set_ai_test_result) = create_signal(None::<(bool, String)>);
+    // Build provenance footer line, e.g. "SHA a1b2c3d · main · built 2026-08-21 12:34 UTC".
+    let (version_line, set_version_line) = create_signal(None::<String>);
 
 
 
@@ -581,6 +605,31 @@ pub fn App() -> impl IntoView {
     // Initial load + auto-reload whenever base/token/range changes.
     create_effect(move |_| {
         refresh();
+    });
+
+    // Build provenance (one-shot, no auth): fetch /version.json baked by
+    // scripts/publish.sh and render the footer line. Graceful: any failure
+    // (no file, non-200, unparseable — e.g. plain `trunk serve`) hides it.
+    spawn_local(async move {
+        let line = async {
+            let resp = Request::get("/version.json").send().await.map_err(|e| e.to_string())?;
+            if !resp.ok() {
+                return Err(format!("version.json: HTTP {}", resp.status()));
+            }
+            let v: VersionInfo = resp.json().await.map_err(|e| e.to_string())?;
+            let mut parts = vec![format!("SHA {}", v.sha)];
+            if !v.branch.is_empty() {
+                parts.push(v.branch);
+            }
+            if !v.built_at.is_empty() {
+                parts.push(format!("built {}", fmt_built_at(&v.built_at)));
+            }
+            Ok(parts.join(" · "))
+        }
+        .await;
+        if let Ok(line) = line {
+            set_version_line.set(Some(line));
+        }
     });
 
     // -- Timeline actions ----------------------------------------------------
@@ -2221,6 +2270,7 @@ pub fn App() -> impl IntoView {
                     <span>"EPHORIX · RAW METRICS ARE SACRED · SESSIONS ARE DISCIPLINE"</span>
                 </div>
                 <div class="footer-motto">"ΜΟΛΩΝ ΛΑΒΕ"</div>
+                {move || version_line.get().map(|v| view! { <div class="footer-version">{v}</div> })}
             </footer>
 
             <button class="oracle-fab" on:click=oracle_toggle title="Ask the Pythia oracle about your training">

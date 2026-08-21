@@ -4,8 +4,10 @@
 #
 #   1. Re-executes itself via sudo, so the whole loop stays elevated (the
 #      sudo password is asked exactly once).
-#   2. Checks the working tree every POLL_INTERVAL (default 5s) — committed
-#      AND uncommitted changes both count (the Docker build copies the tree).
+#   2. Checks for NEW COMMITS every POLL_INTERVAL (default 5s) — only
+#      committed changes count: the fingerprint is the HEAD sha, so a
+#      rebuild/push happens when new commits land locally (git pull or
+#      local commits). Uncommitted working-tree edits do NOT trigger it.
 #   3. On change: builds + pushes the images, then fires the deploy webhook
 #      2s later.
 #   4. Repeats forever. The last-built fingerprint is kept in
@@ -92,16 +94,15 @@ BRANCH="$("${GIT[@]}" rev-parse --abbrev-ref HEAD)"
 UPSTREAM="$("${GIT[@]}" rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || echo "origin/$BRANCH")"
 REMOTE="${UPSTREAM%%/*}"
 
-# Fingerprint of the build-relevant working tree (backend/ + frontend/):
-# HEAD sha + content hash of tracked diffs + content hash of untracked files.
-# Catches committed AND uncommitted changes, so a dirty dev tree still
-# triggers a rebuild/push (the Docker build copies the working tree).
+# Fingerprint = the local HEAD commit only (full + short sha). Committed
+# changes only: a rebuild/push happens when new commits land (git pull or
+# local commits); uncommitted working-tree edits are ignored. Provenance is
+# baked into the image as frontend/version.json (see build loop below).
 build_fingerprint() {
-    local sha tracked untracked
+    local sha short
     sha="$("${GIT[@]}" rev-parse HEAD 2>/dev/null || echo none)"
-    tracked="$("${GIT[@]}" diff HEAD -- backend frontend 2>/dev/null | sha256sum | cut -d' ' -f1)"
-    untracked="$("${GIT[@]}" ls-files --others --exclude-standard -- backend frontend 2>/dev/null | sort | xargs -r sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)"
-    echo "${sha}:${tracked}:${untracked}"
+    short="$("${GIT[@]}" rev-parse --short=7 HEAD 2>/dev/null || echo none)"
+    echo "${sha}:${short}"
 }
 
 build_and_push() {
@@ -132,8 +133,8 @@ echo "==> publish watchdog up: branch=$BRANCH remote=$REMOTE poll=${POLL_INTERVA
 echo "==> last published fingerprint: ${LAST_FP:-<none>}  state: $STATE_FILE"
 
 while true; do
-    # Pull remote commits (best-effort): a dirty working tree makes ff-only
-    # fail safely, and the fingerprint still reflects the local changes.
+    # Pull remote commits (best-effort): only committed changes count, and
+    # ff-only keeps the local history linear (fails safely on conflicts).
     "${GIT[@]}" fetch --quiet "$REMOTE" 2>/dev/null || true
     "${GIT[@]}" merge --ff-only "$UPSTREAM" >/dev/null 2>&1 || true
 
@@ -145,6 +146,16 @@ while true; do
     fi
 
     SHA="$("${GIT[@]}" rev-parse --short=7 HEAD)"
+    FULL_SHA="$("${GIT[@]}" rev-parse HEAD)"
+
+    # Bake build provenance into the web image: the Docker build copies the
+    # working tree, so version.json placed here lands in the image and is
+    # served by nginx + rendered in the footer. Git-ignored (see .gitignore).
+    {
+        printf '{"sha":"%s","fullSha":"%s","branch":"%s","builtAt":"%s"}\n' \
+            "$SHA" "$FULL_SHA" "$BRANCH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > frontend/version.json
+
     if [[ -n "$RELEASE_TAG" ]]; then
         TAGS=("${BASE_TAGS[@]}" "$SHA")
     else

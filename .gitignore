@@ -9,6 +9,9 @@
 # Publish watchdog runtime state (scripts/publish.sh)
 .last-published-sha
 
+# Build provenance baked at publish time (scripts/publish.sh) — never commit
+frontend/version.json
+
 # Trunk / wasm build output
 frontend/dist/
 

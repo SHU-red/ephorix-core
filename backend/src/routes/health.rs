@@ -86,10 +86,12 @@ pub async fn ingest_batch(
     );
 
     let mut tx = pool.begin().await?;
+    let mut raw_inserted = 0usize;
     for s in &batch.samples {
-        sqlx::query(
+        let res = sqlx::query(
             "INSERT INTO raw_health_data (timestamp, user_id, heart_rate, steps, active_calories)
-             VALUES ($1, $2, $3, $4, $5)",
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (user_id, timestamp) DO NOTHING",
         )
         .bind(s.timestamp)
         .bind(user.0)
@@ -98,6 +100,7 @@ pub async fn ingest_batch(
         .bind(s.active_calories)
         .execute(&mut *tx)
         .await?;
+        raw_inserted += res.rows_affected() as usize;
     }
     tx.commit().await?;
 
@@ -131,7 +134,7 @@ pub async fn ingest_batch(
     .await?;
 
     Ok(Json(json!({
-        "inserted": batch.samples.len(),
+        "inserted": raw_inserted + normalized_count,
         "normalized": normalized_count,
     })))
 }
