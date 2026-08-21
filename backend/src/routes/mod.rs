@@ -117,6 +117,8 @@ pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
             post(metrics::reject_detection),
         )
         .route("/api/v1/ai/parse", post(ai::parse))
+        .route("/api/v1/ai/chat", post(ai::chat))
+        .route("/api/v1/ai/test", post(ai::test_provider))
         .route_layer(middleware::from_fn_with_state(pool.clone(), auth::require_auth));
 
     Router::new()

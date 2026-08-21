@@ -37,6 +37,97 @@ struct LogEntry {
     msg: String,
 }
 
+// --- Pythia oracle (AI chat panel) -----------------------------------------
+
+/// One message in the oracle chat thread.
+#[derive(Clone)]
+struct OracleMsg {
+    id: u64,
+    /// "user" or "assistant"
+    role: &'static str,
+    content: String,
+}
+
+/// Which editable control fits a proposal's new value.
+#[derive(Clone, Copy, PartialEq)]
+enum ProposalInput {
+    Number,
+    Days,
+    Bool,
+    Text,
+}
+
+/// One pending oracle proposal in review: adjustable draft + accept flag.
+#[derive(Clone)]
+struct OracleProposalRow {
+    key: String,
+    label: String,
+    /// Formatted current value (muted, struck through in the UI).
+    current: String,
+    reason: String,
+    /// Editable draft of the new value as text (parsed on accept).
+    draft: String,
+    input: ProposalInput,
+    checked: bool,
+}
+
+/// Write `value` at a dotted path ("series.heartRate") inside a settings
+/// object, creating intermediate objects as needed. False for empty paths.
+fn set_path(root: &mut Value, dotted: &str, value: Value) -> bool {
+    let parts: Vec<&str> = dotted.split('.').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return false;
+    }
+    let mut cur = root;
+    for part in &parts[..parts.len() - 1] {
+        if !cur.is_object() {
+            *cur = Value::Object(serde_json::Map::new());
+        }
+        let key = (*part).to_string();
+        cur = match cur.as_object_mut().unwrap().entry(key) {
+            serde_json::map::Entry::Occupied(e) => e.into_mut(),
+            serde_json::map::Entry::Vacant(e) => e.insert(Value::Object(serde_json::Map::new())),
+        };
+    }
+    if !cur.is_object() {
+        *cur = Value::Object(serde_json::Map::new());
+    }
+    cur.as_object_mut().unwrap().insert(parts[parts.len() - 1].to_string(), value);
+    true
+}
+
+/// Compact display of a JSON value for the proposal diff ("—" for null).
+fn fmt_value(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => "—".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Which editor fits a proposal value (the key wins for rangeDays presets).
+fn proposal_input_for(key: &str, proposed: &Value) -> ProposalInput {
+    if key.contains("rangeDays") {
+        ProposalInput::Days
+    } else if proposed.as_bool().is_some() {
+        ProposalInput::Bool
+    } else if proposed.is_number() {
+        ProposalInput::Number
+    } else {
+        ProposalInput::Text
+    }
+}
+
+/// A proposal value as its editable draft string.
+fn proposal_draft(v: &Value) -> String {
+    match v {
+        Value::Bool(b) => b.to_string(),
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tab {
     Gymnasia,
@@ -354,6 +445,21 @@ pub fn App() -> impl IntoView {
     let (goal_protein, set_goal_protein) = create_signal("140".to_string());
     let (goal_carb, set_goal_carb) = create_signal("250".to_string());
     let (goal_fat, set_goal_fat) = create_signal("70".to_string());
+    // Pythia oracle: floating AI chat panel (state digest + thread + proposals).
+    let (oracle_open, set_oracle_open) = create_signal(false);
+    let (oracle_msgs, set_oracle_msgs) = create_signal(Vec::<OracleMsg>::new());
+    let (oracle_busy, set_oracle_busy) = create_signal(false);
+    let (oracle_input, set_oracle_input) = create_signal(String::new());
+    let (oracle_error, set_oracle_error) = create_signal(None::<String>);
+    let (oracle_digest, set_oracle_digest) = create_signal(Vec::<(String, String)>::new());
+    let (oracle_proposals, set_oracle_proposals) = create_signal(Vec::<OracleProposalRow>::new());
+    let oracle_msg_seq = create_rw_signal(0u64);
+    let oracle_thread_ref: NodeRef<leptos::html::Div> = create_node_ref();
+    // AI provider config (persisted as settings.aiProvider).
+    let (ai_provider, set_ai_provider) = create_signal("llamacpp".to_string());
+    let (ai_testing, set_ai_testing) = create_signal(false);
+    let (ai_test_result, set_ai_test_result) = create_signal(None::<(bool, String)>);
+
 
 
     // Persist series visibility + range to the backend settings.
@@ -362,7 +468,7 @@ pub fn App() -> impl IntoView {
         let token = token.get();
         let s = series.get();
         let d = days.get();
-        let ai = json!({ "baseUrl": ai_base.get(), "model": ai_model.get(), "apiKey": ai_key.get() });
+        let ai = json!({ "provider": ai_provider.get(), "baseUrl": ai_base.get(), "model": ai_model.get(), "apiKey": ai_key.get() });
         let targets = json!({ "steps": target_steps.get(), "kcal": target_kcal.get(), "sleepH": target_sleep.get() });
         spawn_local(async move {
             let body = json!({
@@ -438,6 +544,7 @@ pub fn App() -> impl IntoView {
                         }
                     }
                     if let Some(ai) = sv.get("aiProvider") {
+                        set_ai_provider.set(ai.get("provider").and_then(|v| v.as_str()).unwrap_or("llamacpp").to_string());
                         set_ai_base.set(ai.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("").to_string());
                         set_ai_model.set(ai.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string());
                         set_ai_key.set(ai.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").to_string());
@@ -978,6 +1085,348 @@ pub fn App() -> impl IntoView {
 
     let toggle_zoom_mode = move |_| set_zoom_mode.update(|v| *v = !*v);
     let do_reset_zoom = move |_| reset_zoom.set(reset_zoom.get() + 1);
+
+    // -- Pythia oracle (AI chat panel) ----------------------------------------
+
+    // Compact state digest for the panel strip (recomputed when the panel
+    // opens).
+    let oracle_digest_lines = move || -> Vec<(String, String)> {
+        let ready = readiness.get().and_then(|d| d.last().cloned());
+        let be = body_energy.get();
+        let sleep_h = sleep.get().last().map(|s| s.sleep_seconds / 3600.0);
+        let types_ = types.get();
+        let type_name = |id: &Option<String>| {
+            match id.as_deref() {
+                Some(tid) => types_
+                    .iter()
+                    .find(|t| t.id == *tid)
+                    .map(|t| t.name.clone())
+                    .unwrap_or_else(|| "Workout".to_string()),
+                None => "Workout".to_string(),
+            }
+        };
+        let ss = sessions.get();
+        let session_line = if let Some(a) = ss.iter().find(|s| s.status == "active") {
+            let start = ms_from_iso(&a.start_time).map(fmt_time).unwrap_or_default();
+            format!("{} · LIVE since {start}", type_name(&a.type_id))
+        } else if let Some(w) = ss
+            .iter()
+            .filter(|s| s.status != "active")
+            .max_by(|a, b| {
+                ms_from_iso(&a.start_time)
+                    .unwrap_or(0.0)
+                    .partial_cmp(&ms_from_iso(&b.start_time).unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        {
+            let start = ms_from_iso(&w.start_time).map(fmt_time).unwrap_or_default();
+            let dur = match (ms_from_iso(&w.start_time), w.end_time.as_deref().and_then(ms_from_iso)) {
+                (Some(s), Some(e)) if e > s => format!(" · {:.0}m", (e - s) / 60_000.0),
+                _ => String::new(),
+            };
+            format!("{} · {start}{dur}", type_name(&w.type_id))
+        } else {
+            "—".to_string()
+        };
+        vec![
+            ("READINESS".into(), ready.map(|r| format!("{:.0} / 300", r.score)).unwrap_or_else(|| "—".into())),
+            ("BATTERY".into(), be.as_ref().map(|b| format!("{:.0} / 300", b.score)).unwrap_or_else(|| "—".into())),
+            ("STRESS".into(), be.as_ref().map(|b| format!("{:.0} pts", b.stress)).unwrap_or_else(|| "—".into())),
+            ("SLEEP".into(), sleep_h.map(|h| format!("{h:.1} h")).unwrap_or_else(|| "—".into())),
+            ("SESSION".into(), session_line),
+            ("NUTRITION".into(), nut_daily.get().map(|n| format!("{:.0} kcal · {:.0} ml", n.kcal, n.water_ml)).unwrap_or_else(|| "—".into())),
+        ]
+    };
+
+    // Bounded (~2KB) state context sent with every chat turn.
+    let oracle_context = move || -> Value {
+        let ready = readiness.get().and_then(|d| d.last().cloned());
+        let be = body_energy.get();
+        let sleep_h = sleep.get().last().map(|s| s.sleep_seconds / 3600.0);
+        let types_ = types.get();
+        let type_name = |id: &Option<String>| {
+            match id.as_deref() {
+                Some(tid) => types_
+                    .iter()
+                    .find(|t| t.id == *tid)
+                    .map(|t| t.name.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                None => "unknown".to_string(),
+            }
+        };
+        let ss = sessions.get();
+        let active = ss.iter().find(|s| s.status == "active").map(|s| {
+            json!({
+                "type": type_name(&s.type_id),
+                "startMs": ms_from_iso(&s.start_time).unwrap_or(0.0),
+                "endMs": s.end_time.as_deref().and_then(ms_from_iso),
+            })
+        });
+        let last_done = ss
+            .iter()
+            .filter(|s| s.status != "active")
+            .max_by(|a, b| {
+                ms_from_iso(&a.start_time)
+                    .unwrap_or(0.0)
+                    .partial_cmp(&ms_from_iso(&b.start_time).unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        let last_workout = last_done.map(|w| {
+            let start = ms_from_iso(&w.start_time).unwrap_or(0.0);
+            let dur = w
+                .end_time
+                .as_deref()
+                .and_then(ms_from_iso)
+                .and_then(|e| (e > start).then(|| (e - start) / 60_000.0));
+            json!({ "type": type_name(&w.type_id), "durationMin": dur })
+        });
+        let sc = series.get();
+        json!({
+            "date": today_str(),
+            "rangeDays": days.get(),
+            "readinessScore": ready.map(|r| r.score),
+            "battery": be.as_ref().map(|b| b.score),
+            "stress": be.as_ref().map(|b| b.stress),
+            "sleepH": sleep_h,
+            "activeSession": active,
+            "lastWorkout": last_workout,
+            "nutritionToday": nut_daily.get().map(|n| json!({
+                "kcal": n.kcal,
+                "protein": n.protein,
+                "carbs": n.carbs,
+                "fat": n.fat,
+                "waterMl": n.water_ml,
+            })),
+            "targets": { "steps": target_steps.get(), "kcal": target_kcal.get(), "sleepH": target_sleep.get() },
+            "series": { "heartRate": sc.heart_rate, "steps": sc.steps, "calories": sc.calories },
+            "aiProviderModel": ai_model.get(),
+        })
+    };
+
+    let oracle_toggle = move |_| {
+        let open = !oracle_open.get();
+        if open {
+            set_oracle_digest.set(oracle_digest_lines());
+            set_oracle_error.set(None);
+        }
+        set_oracle_open.set(open);
+    };
+
+    // Send one chat turn (also called from the input's Enter key).
+    let oracle_send = move || {
+        let text = oracle_input.get().trim().to_string();
+        if text.is_empty() || oracle_busy.get() || ai_model.get().trim().is_empty() {
+            return;
+        }
+        let base = base.get();
+        let token = token.get();
+        let context = oracle_context();
+        let id = oracle_msg_seq.get();
+        oracle_msg_seq.set(id + 1);
+        set_oracle_msgs.update(|v| v.push(OracleMsg { id, role: "user", content: text }));
+        set_oracle_input.set(String::new());
+        set_oracle_error.set(None);
+        // History = the last 12 messages (including the one just pushed).
+        let history: Vec<ChatMessage> = oracle_msgs
+            .get()
+            .into_iter()
+            .rev()
+            .take(12)
+            .rev()
+            .map(|m| ChatMessage { role: m.role.to_string(), content: m.content })
+            .collect();
+        set_oracle_busy.set(true);
+        spawn_local(async move {
+            match ai_chat(&base, &token, &history, &context).await {
+                Ok(resp) => {
+                    let id = oracle_msg_seq.get();
+                    oracle_msg_seq.set(id + 1);
+                    set_oracle_msgs.update(|v| v.push(OracleMsg { id, role: "assistant", content: resp.reply }));
+                    set_oracle_proposals.set(
+                        resp
+                            .proposals
+                            .into_iter()
+                            .map(|p| {
+                                let input = proposal_input_for(&p.key, &p.proposed);
+                                OracleProposalRow {
+                                    key: p.key,
+                                    label: p.label,
+                                    current: fmt_value(&p.current),
+                                    reason: p.reason,
+                                    draft: proposal_draft(&p.proposed),
+                                    input,
+                                    checked: true,
+                                }
+                            })
+                            .collect(),
+                    );
+                }
+                Err(e) => {
+                    let id = oracle_msg_seq.get();
+                    oracle_msg_seq.set(id + 1);
+                    set_oracle_msgs.update(|v| v.push(OracleMsg { id, role: "assistant", content: format!("[PYTHIA ERROR] {e}") }));
+                    set_oracle_proposals.set(Vec::new());
+                }
+            }
+            set_oracle_busy.set(false);
+        });
+    };
+
+    // Keep the thread pinned to the newest message.
+    create_effect(move |_| {
+        let _ = oracle_msgs.get().len();
+        let _ = oracle_busy.get();
+        if let Some(el) = oracle_thread_ref.get() {
+            el.set_scroll_top(el.scroll_height());
+        }
+    });
+
+    // Accept the checked proposals: read the settings blob, apply each
+    // (possibly adjusted) value at its dotted key path, PUT it back, then
+    // refresh so KPIs/charts reflect the change.
+    let oracle_accept = move |_| {
+        let accepted: Vec<(String, String, ProposalInput)> = oracle_proposals
+            .get()
+            .into_iter()
+            .filter(|p| p.checked)
+            .map(|p| (p.key, p.draft, p.input))
+            .collect();
+        set_oracle_proposals.set(Vec::new());
+        if accepted.is_empty() {
+            return;
+        }
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            let mut settings = fetch_settings(&base, &token).await.unwrap_or(Value::Null);
+            if !settings.is_object() {
+                settings = json!({});
+            }
+            let mut applied = 0usize;
+            for (key, draft, kind) in &accepted {
+                let path = key.strip_prefix("settings.").unwrap_or(key);
+                let value: Value = match kind {
+                    ProposalInput::Bool => json!(draft.trim() == "true"),
+                    ProposalInput::Days => draft.trim().parse::<i64>().map(Value::from).unwrap_or(Value::Null),
+                    ProposalInput::Number => draft.trim().parse::<f64>().map(Value::from).unwrap_or(Value::Null),
+                    ProposalInput::Text => json!(draft),
+                };
+                if set_path(&mut settings, path, value) {
+                    applied += 1;
+                }
+            }
+            match put_settings(&base, &token, &settings).await {
+                Ok(_) => {
+                    log_event("ai", &format!("oracle accepted {applied} changes"));
+                    set_oracle_open.set(false);
+                    // Mirror accepted values into the local signals that
+                    // drive the UI (settings only load once per session).
+                    for (key, draft, kind) in &accepted {
+                        match (key.strip_prefix("settings."), kind) {
+                            (Some("rangeDays"), ProposalInput::Days) => {
+                                if let Ok(d) = draft.trim().parse::<i64>() {
+                                    set_days.set(d);
+                                }
+                            }
+                            (Some("series.heartRate"), ProposalInput::Bool) => set_series.update(|s| s.heart_rate = draft.trim() == "true"),
+                            (Some("series.steps"), ProposalInput::Bool) => set_series.update(|s| s.steps = draft.trim() == "true"),
+                            (Some("series.calories"), ProposalInput::Bool) => set_series.update(|s| s.calories = draft.trim() == "true"),
+                            (Some("targets.steps"), ProposalInput::Number) => {
+                                if let Ok(v) = draft.trim().parse::<i64>() {
+                                    set_target_steps.set(v);
+                                }
+                            }
+                            (Some("targets.kcal"), ProposalInput::Number) => {
+                                if let Ok(v) = draft.trim().parse::<i64>() {
+                                    set_target_kcal.set(v);
+                                }
+                            }
+                            (Some("targets.sleepH"), ProposalInput::Number) => {
+                                if let Ok(v) = draft.trim().parse::<f64>() {
+                                    set_target_sleep.set(v);
+                                }
+                            }
+                            (Some("aiProvider.model"), ProposalInput::Text) => set_ai_model.set(draft.clone()),
+                            _ => {}
+                        }
+                    }
+                    refresh();
+                }
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    };
+
+    let oracle_dismiss = move |_| set_oracle_proposals.set(Vec::new());
+
+    // -- Nomoi: AI provider test + save ----------------------------------------
+
+    // Placeholder base URL per provider.
+    let ai_placeholder = move || -> &'static str {
+        match ai_provider.get().as_str() {
+            "ollama" => "http://localhost:11434",
+            "openai" => "https://api.openai.com/v1",
+            _ => "http://localhost:8080/v1",
+        }
+    };
+
+    let test_ai_provider = move |_| {
+        let provider = ai_provider.get();
+        let b_url = ai_base.get();
+        let model = ai_model.get();
+        let key = ai_key.get();
+        let base = base.get();
+        let token = token.get();
+        set_ai_testing.set(true);
+        set_ai_test_result.set(None);
+        spawn_local(async move {
+            let out = ai_test(&base, &token, &provider, &b_url, &model, &key).await;
+            set_ai_testing.set(false);
+            set_ai_test_result.set(Some(match out {
+                Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => {
+                    let reply = v.get("reply").and_then(|r| r.as_str()).unwrap_or("").to_string();
+                    (true, if reply.is_empty() { "PROVIDER REACHABLE".to_string() } else { reply })
+                }
+                Ok(v) => (
+                    false,
+                    v.get("error")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("provider rejected the test")
+                        .to_string(),
+                ),
+                Err(e) => (false, e),
+            }));
+        });
+    };
+
+    // Read-merge-PUT: only settings.aiProvider changes, other keys preserved.
+    let save_ai_provider = move |_| {
+        let provider = ai_provider.get();
+        let b_url = ai_base.get();
+        let model = ai_model.get();
+        let key = ai_key.get();
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            let mut ai = json!({ "provider": provider, "baseUrl": b_url, "model": model });
+            if !key.trim().is_empty() {
+                ai["apiKey"] = json!(key.trim());
+            }
+            let mut settings = fetch_settings(&base, &token).await.unwrap_or(Value::Null);
+            if !settings.is_object() {
+                settings = json!({});
+            }
+            settings["aiProvider"] = ai;
+            match put_settings(&base, &token, &settings).await {
+                Ok(_) => {
+                    log_event("settings", "saved aiProvider");
+                    set_ai_test_result.set(None);
+                }
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    };
+
     // -----------------------------------------------------------------------
     view! {
         <div class="app">
@@ -1642,20 +2091,39 @@ pub fn App() -> impl IntoView {
                             </div>
                         </section>
                         <section class="panel">
-                            <div class="panel-head"><h2>"AI PROVIDER (LOCAL OR REMOTE)"</h2></div>
+                            <div class="panel-head"><h2>"PYTHIA — AI PROVIDER"</h2></div>
                             <div class="settings-grid">
+                                <label class="ctl">"PROVIDER"
+                                    <select on:change=move |ev| set_ai_provider.set(event_target_value(&ev))>
+                                        <option value="llamacpp">"LLAMA.CPP (LOCAL)"</option>
+                                        <option value="ollama">"OLLAMA (LOCAL)"</option>
+                                        <option value="openai">"OPENAI (REMOTE)"</option>
+                                    </select>
+                                </label>
                                 <label class="ctl">"BASE URL (CHAT COMPLETIONS)"
-                                    <input prop:value=ai_base on:input=move |ev| set_ai_base.set(event_target_value(&ev)) placeholder="http://localhost:11434/v1" />
+                                    <input prop:value=ai_base on:input=move |ev| set_ai_base.set(event_target_value(&ev)) placeholder=move || ai_placeholder() spellcheck="false" />
                                 </label>
                                 <label class="ctl">"MODEL"
                                     <input prop:value=ai_model on:input=move |ev| set_ai_model.set(event_target_value(&ev)) placeholder="llama3" />
                                 </label>
                                 <label class="ctl">"API KEY"
-                                    <input prop:value=ai_key on:input=move |ev| set_ai_key.set(event_target_value(&ev)) placeholder="(blank for local)" />
+                                    <input type="password" prop:value=ai_key on:input=move |ev| set_ai_key.set(event_target_value(&ev)) placeholder="(blank for local)" />
                                 </label>
                             </div>
-                            <p class="muted" style="margin-top:12px">"One OpenAI-compatible protocol for local (Ollama, LM Studio, llama.cpp) and remote providers — only the URL differs, so everything can stay on your machine."</p>
-                            <button class="btn" style="margin-top:12px" on:click=move |_| persist_settings()>"SAVE"</button>
+                            <p class="muted" style="margin-top:12px">"Feeds the PYTHIA oracle (the red button, every tab) — local llama.cpp / Ollama or remote OpenAI. Nothing leaves this machine unless you point it there."</p>
+                            <div class="ai-provider-actions">
+                                <button class="btn" disabled=move || ai_testing.get() on:click=test_ai_provider>{move || if ai_testing.get() { "TESTING…".to_string() } else { "TEST".to_string() }}</button>
+                                <button class="btn" on:click=save_ai_provider>"SAVE"</button>
+                            </div>
+                            {move || match ai_test_result.get() {
+                                None => view! {}.into_view(),
+                                Some((ok, msg)) => {
+                                    let cls = if ok { "ai-test-result ok" } else { "ai-test-result fail" };
+                                    view! {
+                                        <p class=cls>{msg}</p>
+                                    }.into_view()
+                                }
+                            }}
                         </section>
                         <section class="panel import-panel">
                             <div class="panel-head"><h2>"IMPORT DATA"</h2><span class="muted">{move || import_name.get()}</span></div>
@@ -1754,6 +2222,180 @@ pub fn App() -> impl IntoView {
                 </div>
                 <div class="footer-motto">"ΜΟΛΩΝ ΛΑΒΕ"</div>
             </footer>
+
+            <button class="oracle-fab" on:click=oracle_toggle title="Ask the Pythia oracle about your training">
+                <span class="oracle-fab-glyph" inner_html=glyph_svg("shield")></span>
+                <span>"PYTHIA"</span>
+            </button>
+            <Show when=move || oracle_open.get() fallback=|| ()>
+                <div class="oracle-panel">
+                    <div class="oracle-head">
+                        <span class="oracle-head-glyph" inner_html=glyph_svg("shield")></span>
+                        <span class="oracle-title">"PYTHIA — ORACLE"</span>
+                        <button class="oracle-close" on:click=move |_| set_oracle_open.set(false)>"✕"</button>
+                    </div>
+                    <div class="oracle-digest">
+                        {move || {
+                            let d = oracle_digest.get();
+                            d.into_iter()
+                                .map(|(l, v)| {
+                                    view! {
+                                        <span class="oracle-digest-chip"><b>{l}</b><span>{v}</span></span>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </div>
+                    <div class="oracle-thread" node_ref=oracle_thread_ref>
+                        <For each=move || oracle_msgs.get() key=|m| m.id let:m>
+                            {move || {
+                                let cls = if m.role == "user" { "oracle-msg user" } else { "oracle-msg assistant" };
+                                view! {
+                                    <div class=cls>{m.content.clone()}</div>
+                                }
+                            }}
+                        </For>
+                        <Show when=move || oracle_busy.get() fallback=|| ()>
+                            <div class="oracle-msg assistant"><span class="oracle-think">"THE ORACLE CONSIDERS…"</span></div>
+                        </Show>
+                    </div>
+                    <Show when=move || !oracle_proposals.get().is_empty() fallback=|| ()>
+                        <div class="oracle-proposals">
+                            <div class="oracle-proposals-head">"PROPOSED CHANGES"</div>
+                            <For each=move || oracle_proposals.get() key=|p| p.key.clone() let:p>
+                                {move || {
+                                    let key = p.key.clone();
+                                    let key_checked = key.clone();
+                                    let key_change = key.clone();
+                                    let key_new = key.clone();
+                                    let key_view = key.clone();
+                                    view! {
+                                        <div class="oracle-proposal">
+                                            <label class="oracle-prop-head">
+                                                <input type="checkbox"
+                                                    checked=move || oracle_proposals.get().iter().find(|r| r.key == key_checked).map(|r| r.checked).unwrap_or(false)
+                                                    on:change=move |ev| {
+                                                        let c = event_target_checked(&ev);
+                                                        set_oracle_proposals.update(|xs| {
+                                                            if let Some(r) = xs.iter_mut().find(|r| r.key == key_change) {
+                                                                r.checked = c;
+                                                            }
+                                                        });
+                                                    }/>
+                                                <span>{p.label.clone()}</span>
+                                            </label>
+                                            <div class="oracle-prop-diff">
+                                                <span class="oracle-prop-old">{p.current.clone()}</span>
+                                                <span class="oracle-prop-arrow">"→"</span>
+                                                <span class="oracle-prop-new">{move || oracle_proposals.get().iter().find(|r| r.key == key_new).map(|r| r.draft.clone()).unwrap_or_default()}</span>
+                                            </div>
+                                            <div class="oracle-prop-reason">{p.reason.clone()}</div>
+                                            {move || {
+                                                let key = key_view.clone();
+                                                let key_num_val = key.clone();
+                                                let key_num_in = key.clone();
+                                                let key_days_val = key.clone();
+                                                let key_days_ch = key.clone();
+                                                let key_bool_chk = key.clone();
+                                                let key_bool_ch = key.clone();
+                                                let key_text_val = key.clone();
+                                                let key_text_in = key.clone();
+                                                let Some(kind) = oracle_proposals.get().into_iter().find(|r| r.key == key).map(|r| r.input) else {
+                                                    return view! {}.into_view();
+                                                };
+                                                match kind {
+                                                    ProposalInput::Number => view! {
+                                                        <input class="oracle-prop-input" type="number" step="any"
+                                                            prop:value=move || oracle_proposals.get().iter().find(|r| r.key == key_num_val).map(|r| r.draft.clone()).unwrap_or_default()
+                                                            on:input=move |ev| set_oracle_proposals.update(|xs| {
+                                                                if let Some(r) = xs.iter_mut().find(|r| r.key == key_num_in) {
+                                                                    r.draft = event_target_value(&ev);
+                                                                }
+                                                            }) />
+                                                    }.into_view(),
+                                                    ProposalInput::Days => view! {
+                                                        <select class="oracle-prop-input"
+                                                            prop:value=move || oracle_proposals.get().iter().find(|r| r.key == key_days_val).map(|r| r.draft.clone()).unwrap_or_default()
+                                                            on:change=move |ev| set_oracle_proposals.update(|xs| {
+                                                                if let Some(r) = xs.iter_mut().find(|r| r.key == key_days_ch) {
+                                                                    r.draft = event_target_value(&ev);
+                                                                }
+                                                            })>
+                                                            <option value="1">"1D"</option>
+                                                            <option value="7">"7D"</option>
+                                                            <option value="30">"30D"</option>
+                                                            <option value="365">"365D"</option>
+                                                        </select>
+                                                    }.into_view(),
+                                                    ProposalInput::Bool => view! {
+                                                        <label class="oracle-prop-bool">
+                                                            <input type="checkbox"
+                                                                checked=move || oracle_proposals.get().iter().find(|r| r.key == key_bool_chk).map(|r| r.draft == "true").unwrap_or(false)
+                                                                on:change=move |ev| {
+                                                                    let c = event_target_checked(&ev);
+                                                                    set_oracle_proposals.update(|xs| {
+                                                                        if let Some(r) = xs.iter_mut().find(|r| r.key == key_bool_ch) {
+                                                                            r.draft = c.to_string();
+                                                                        }
+                                                                    });
+                                                                }/>
+                                                            "ENABLED"
+                                                        </label>
+                                                    }.into_view(),
+                                                    ProposalInput::Text => view! {
+                                                        <input class="oracle-prop-input"
+                                                            prop:value=move || oracle_proposals.get().iter().find(|r| r.key == key_text_val).map(|r| r.draft.clone()).unwrap_or_default()
+                                                            on:input=move |ev| set_oracle_proposals.update(|xs| {
+                                                                if let Some(r) = xs.iter_mut().find(|r| r.key == key_text_in) {
+                                                                    r.draft = event_target_value(&ev);
+                                                                }
+                                                            }) />
+                                                    }.into_view(),
+                                                }
+                                            }}
+                                        </div>
+                                    }
+                                }}
+                            </For>
+                            <div class="oracle-prop-actions">
+                                <button class="btn small" on:click=oracle_accept>"ACCEPT SELECTED"</button>
+                                <button class="btn small" on:click=oracle_dismiss>"DISMISS"</button>
+                            </div>
+                        </div>
+                    </Show>
+                    <Show when=move || oracle_error.get().is_some() fallback=|| ()>
+                        <div class="oracle-error">{move || oracle_error.get().unwrap_or_default()}</div>
+                    </Show>
+                    {move || {
+                        if ai_model.get().trim().is_empty() {
+                            view! {
+                                <div class="oracle-hint">
+                                    <span>"NO AI PROVIDER CONFIGURED — THE ORACLE IS SILENT."</span>
+                                    <button class="btn small" on:click=move |_| {
+                                        set_current_tab.set(Tab::Nomoi);
+                                        set_oracle_open.set(false);
+                                    }>"OPEN AI CONFIG"</button>
+                                </div>
+                            }.into_view()
+                        } else {
+                            view! {
+                                <div class="oracle-input-row">
+                                    <input class="oracle-input" placeholder="ask the oracle about your training…" spellcheck="false"
+                                        prop:value=oracle_input
+                                        on:input=move |ev| set_oracle_input.set(event_target_value(&ev))
+                                        on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                            if ev.key() == "Enter" && !ev.shift_key() {
+                                                ev.prevent_default();
+                                                oracle_send();
+                                            }
+                                        } />
+                                    <button class="btn small" disabled=move || oracle_busy.get() on:click=move |_| oracle_send()>"SEND"</button>
+                                </div>
+                            }.into_view()
+                        }
+                    }}
+                </div>
+            </Show>
         </div>
     }
 }

@@ -3,7 +3,7 @@
 
 use gloo_net::http::Request;
 use js_sys::Date;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use wasm_bindgen::JsValue;
 
@@ -326,6 +326,72 @@ pub async fn delete_exercise(base: &str, token: &str, session_id: &str, exercise
 pub async fn parse_ai(base: &str, token: &str, text: &str) -> Result<Value, String> {
     post_json(base, token, "/api/v1/ai/parse", &json!({ "text": text })).await
 }
+// ---------------------------------------------------------------------------
+// Pythia oracle (AI chat about training state)
+// ---------------------------------------------------------------------------
+
+/// One message in an oracle chat. `role` is "user" or "assistant".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// A settings change the oracle proposes; the user reviews it in the UI
+/// before it is persisted.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiProposal {
+    /// Dotted settings path, e.g. "settings.rangeDays" or "settings.series.heartRate".
+    pub key: String,
+    /// Human label, e.g. "Timeline range".
+    pub label: String,
+    #[serde(default)]
+    pub current: Value,
+    #[serde(default)]
+    pub proposed: Value,
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiChatResponse {
+    pub reply: String,
+    #[serde(default)]
+    pub proposals: Vec<AiProposal>,
+}
+
+/// POST /api/v1/ai/chat with the message history + a bounded state context.
+pub async fn ai_chat(
+    base: &str,
+    token: &str,
+    messages: &[ChatMessage],
+    context: &Value,
+) -> Result<AiChatResponse, String> {
+    let v = post_json(base, token, "/api/v1/ai/chat", &json!({ "messages": messages, "context": context }))
+        .await?;
+    serde_json::from_value(v).map_err(|e| format!("ai chat decode: {e}"))
+}
+
+/// POST /api/v1/ai/test — one cheap round-trip to the configured provider.
+/// Returns {"ok":true,"reply":str} on success.
+pub async fn ai_test(
+    base: &str,
+    token: &str,
+    provider: &str,
+    base_url: &str,
+    model: &str,
+    api_key: &str,
+) -> Result<Value, String> {
+    let mut body = json!({ "provider": provider, "baseUrl": base_url, "model": model });
+    if !api_key.trim().is_empty() {
+        body["apiKey"] = json!(api_key.trim());
+    }
+    post_json(base, token, "/api/v1/ai/test", &body).await
+}
+
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
