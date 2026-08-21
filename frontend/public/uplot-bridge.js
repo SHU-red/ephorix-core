@@ -140,6 +140,22 @@
     var id = nextId++;
     charts.set(id, chart);
     setupTooltip(chart, seriesMeta);
+
+    // Re-measure on container resize (window resize / device orientation):
+    // uPlot bakes a fixed px width at creation, so without this the chart
+    // stays squished after a rotation. fireScaleChange re-aligns the Rust
+    // overlay + workout strip (plotBBox is re-read on the zoom_version bump).
+    if (typeof ResizeObserver !== "undefined") {
+      var ro = new ResizeObserver(function () {
+        var w = el.clientWidth;
+        if (w > 0 && w !== chart.width) {
+          chart.setSize({ width: w, height: opts.height });
+          fireScaleChange(id);
+        }
+      });
+      ro.observe(el);
+      chart._ephorixResize = ro;
+    }
     return id;
   }
 
@@ -163,6 +179,7 @@
   function destroy(id) {
     var c = charts.get(id);
     if (c) {
+      if (c._ephorixResize) c._ephorixResize.disconnect();
       c.destroy();
       charts.delete(id);
     }

@@ -611,3 +611,151 @@ footer {
   color: var(--muted);
 }
 .import-stat.ok { border-color: var(--red-dark); color: var(--red-bright); background: var(--red-deep); }
+
+/* ---------------- Mobile (header + tabs) ---------------- */
+
+/* Wordmark + header: fit a phone viewport, never overflow the header row. */
+@media (max-width: 720px) {
+  .header {
+    gap: 12px;
+    padding: 12px 0 8px;
+  }
+  .brand {
+    min-width: 0;
+  }
+  .brand h1 {
+    font-size: clamp(34px, 11vw, 56px);
+  }
+  .brand .sub {
+    white-space: normal;
+  }
+  .brand-helmet {
+    height: 44px;
+  }
+  /* Single swipeable row: all 11 tabs reachable by scrolling. */
+  .tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: var(--red-dark) #000;
+  }
+  .tabs::-webkit-scrollbar { height: 6px; }
+  .tabs::-webkit-scrollbar-track { background: #000; }
+  .tabs::-webkit-scrollbar-thumb { background: var(--red-dark); border: 1px solid #000; }
+  .tab {
+    flex: 0 0 auto;
+    min-width: 96px;
+  }
+}
+
+/* The banner is 2.4:1 — below 480px it would crowd the wordmark. */
+@media (max-width: 480px) {
+  .brand-helmet {
+    display: none;
+  }
+}
+
+/* Tap-to-flip: the h1 click handler in app.rs toggles `flip` (hover exists
+   on desktop only). Sticky :hover after a tap is neutralized below so a
+   phone always shows EPHORIX by default and .flip drives the crossfade. */
+.brand h1 {
+  cursor: pointer;
+}
+.brand h1.flip .wm-latin {
+  opacity: 0;
+  transform: translateY(-0.45em) scale(0.96);
+  filter: blur(7px);
+}
+.brand h1.flip .wm-greek {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  filter: blur(0);
+}
+
+/* Touch devices: no hover flip, press feedback, no sticky-:hover label swap. */
+@media (hover: none), (pointer: coarse) {
+  .brand h1:not(.flip):hover .wm-latin {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+  .brand h1:not(.flip):hover .wm-greek {
+    opacity: 0;
+    transform: translateY(0.45em) scale(0.96);
+    filter: blur(7px);
+  }
+  .tab:active {
+    background: var(--red-deep);
+    color: #fff;
+    border-color: var(--red);
+  }
+  .tab.on:active {
+    background: var(--red-dark);
+  }
+  /* A sticky :hover left behind by a tap would swap the label to Greek and
+     stick it; on touch the .en/.gr flip stays pointer-only. */
+  .tab:hover { border-color: var(--line); color: var(--muted); }
+  .tab.on:hover { border-color: var(--red); color: #000; }
+  .tab:hover .en { display: inline; }
+  .tab:hover .gr { display: none; }
+}
+
+/* Animated on/off state, all devices. */
+.tab {
+  transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+
+/* ---------------- Mobile (charts + views) ---------------- */
+
+/* Overflow guard: the layout is designed to fit 360px; a stray fixed pixel
+   width (chips, readouts, chart canvas, tooltip) must never force a
+   horizontal scrollbar. */
+html, body { overflow-x: hidden; }
+
+@media (max-width: 720px) {
+  /* Chart rows stack: the legend drops under the chart/strip it describes,
+     the chart takes the full row width. The workout gutters only make sense
+     while the strip is offset to the plot area — full-width strip, no gutters. */
+  .chart-row, .workout-row { flex-direction: column; }
+  .chart-wrap, .battery-wrap, .workout-strip { flex: none; width: 100%; }
+  .legend-sidebar {
+    flex: 1 1 auto;
+    width: 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .workout-gutter, .workout-gutter-right { display: none; }
+
+  /* The Gymnasia KPI strip hard-codes repeat(6, 1fr) inline, which wins over
+     the sheet's 2-column fallback — re-assert the fallback above the inline. */
+  .kpi { grid-template-columns: repeat(2, 1fr) !important; }
+
+  /* Long names/labels must be able to shrink and wrap inside list rows. */
+  .row-name { min-width: 0; }
+}
+
+@media (max-width: 640px) {
+  /* Dictionary hero: smaller title, body may wrap, image retreats. */
+  .th-title { font-size: 24px; }
+  .th-body { flex-wrap: wrap; gap: 12px; }
+  .th-hero-img { height: 64px; }
+  /* Panel headers with side controls (range pills, nutrition nav) wrap
+     under the title instead of pushing the panel wide. */
+  .panel-head { flex-wrap: wrap; row-gap: 6px; }
+  .range-buttons { flex-wrap: wrap; }
+  .nut-nav { flex-wrap: wrap; }
+}
+
+@media (max-width: 480px) {
+  /* Form controls go full-width, one per row (base min-width is 220px). */
+  .settings-grid .ctl { flex: 1 1 100%; min-width: 0; }
+  /* The session editor's title row (name + start/end labels) may wrap. */
+  .session-editor > div:first-child { flex-wrap: wrap; }
+}
+
+@media (max-width: 420px) {
+  /* No room beside the definition — the hero image drops out entirely. */
+  .th-hero-img { display: none; }
+}

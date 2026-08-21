@@ -321,6 +321,9 @@ pub fn App() -> impl IntoView {
         });
     };
     let (current_tab, set_current_tab) = create_signal(Tab::Gymnasia);
+    // Tap-to-flip for the wordmark: hover doesn't exist on touch devices, so
+    // the h1 click handler toggles the `flip` class (styled in style.css).
+    let (brand_flip, set_brand_flip) = create_signal(false);
     // Leonidas targets (persisted in settings).
     let (target_steps, set_target_steps) = create_signal(10_000i64);
     let (target_kcal, set_target_kcal) = create_signal(500i64);
@@ -981,7 +984,7 @@ pub fn App() -> impl IntoView {
             <header class="header">
                 <div class="brand">
                     <div class="brand-row">
-                        <h1>
+                        <h1 class:flip=move || brand_flip.get() on:click=move |_| { set_brand_flip.update(|v| *v = !*v); }>
                             <span class="wm-state wm-latin">"EPHORIX"</span>
                             <span class="wm-state wm-greek">"ΕΦΟΡΙΞ"</span>
                         </h1>
