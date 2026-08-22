@@ -5,6 +5,7 @@
 use leptos::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use wasm_bindgen::JsCast;
 
 use gloo_net::http::Request;
 
@@ -61,12 +62,15 @@ const RANGES: &[(i64, &str)] = &[(1, "1D"), (7, "1W"), (30, "1M"), (365, "1Y")];
 /// (settings.aiProvider.systemPrompt, appended to every oracle prompt by the
 /// backend). Editable in the Nomoi tab; RESET TO DEFAULT restores this text.
 const DEFAULT_SYSTEM_PROMPT: &str =
-    "You are the oracle of EphoriX speaking to a Spartan warrior. Answer in the app's voice: \
-     short, direct, decisive — no filler, no flattery. Use metric units (kg, km, kcal, hours, %). \
-     Never ask clarifying questions: if a detail is missing, choose a sensible default and state \
-     it in one line. Always give concrete [PYTHIA] values — no ranges, no conditionals. When the \
-     user describes a meal, estimate its calories and macros yourself. Keep replies under 120 \
-     words unless detail is requested.";
+    "You are PYTHIA, the oracle of EphoriX, speaking to a Spartan warrior. Voice: short, direct, decisive — no filler, no flattery, no disclaimers.\n\
+     \n\
+     Rules:\n\
+     - Use metric units only: kg, km, kcal, hours, %.\n\
+     - Never ask clarifying questions. If a detail is missing, pick a sensible default and state it in one line.\n\
+     - Always give concrete [PYTHIA] values — single numbers, no ranges, no conditionals.\n\
+     - When the user describes a meal, estimate its calories and macros yourself.\n\
+     - Format answers: one verdict line first, then a tight bullet list, then a single [PYTHIA] block.\n\
+     - Keep replies under 120 words unless detail is requested.";
 
 /// Which bound of the selected session the chart-click picker is writing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -773,6 +777,7 @@ pub fn App() -> impl IntoView {
     let (oracle_h, set_oracle_h) = create_signal(560u32);
     let oracle_resize_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let oracle_resize_start = create_rw_signal(None::<(f64, f64, u32, u32)>);
+    let oracle_input_ref: NodeRef<leptos::html::Textarea> = create_node_ref();
     // AI provider config (persisted as settings.aiProvider).
     let (ai_provider, set_ai_provider) = create_signal("llamacpp".to_string());
     let (ai_testing, set_ai_testing) = create_signal(false);
@@ -896,7 +901,12 @@ pub fn App() -> impl IntoView {
                         set_ai_base.set(ai.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("").to_string());
                         set_ai_model.set(ai.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string());
                         set_ai_key.set(ai.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").to_string());
-                        set_ai_sys_prompt.set(ai.get("systemPrompt").and_then(|v| v.as_str()).unwrap_or("").to_string());
+                        let stored_prompt = ai.get("systemPrompt").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                        set_ai_sys_prompt.set(if stored_prompt.is_empty() {
+                            DEFAULT_SYSTEM_PROMPT.to_string() // good starting point, not a blank box
+                        } else {
+                            stored_prompt
+                        });
                     }
                     if let Some(t) = sv.get("targets") {
                         set_target_steps.set(t.get("steps").and_then(|v| v.as_i64()).unwrap_or(10_000));
@@ -1844,6 +1854,9 @@ pub fn App() -> impl IntoView {
         oracle_msg_seq.set(id + 1);
         set_oracle_msgs.update(|v| v.push(OracleMsg { id, role: "user", content: text }));
         set_oracle_input.set(String::new());
+        if let Some(el) = oracle_input_ref.get() {
+            let _ = el.set_attribute("style", "height:auto");
+        }
         set_oracle_error.set(None);
         // History = the last 12 messages (including the one just pushed).
         let history: Vec<ChatMessage> = oracle_msgs
@@ -2989,7 +3002,7 @@ pub fn App() -> impl IntoView {
                             </details>
                             <div class="sys-prompt-block">
                                 <label class="ctl">"SYSTEM PROMPT — PYTHIA BEHAVIOUR DIRECTIVES"
-                                    <textarea rows="7" prop:value=ai_sys_prompt on:input=move |ev| set_ai_sys_prompt.set(event_target_value(&ev)) spellcheck="false" placeholder="(empty = built-in oracle directives only)"></textarea>
+                                    <textarea rows="7" prop:value=ai_sys_prompt on:input=move |ev| set_ai_sys_prompt.set(event_target_value(&ev)) spellcheck="false" placeholder="Directives for the oracle — edit freely or keep as the default"></textarea>
                                 </label>
                                 <p class="muted">"Appended to every PYTHIA prompt so the oracle behaves the way you want. Every save is written to the SKOPOS action log and can be reverted there."</p>
                                 <div class="ai-provider-actions">
@@ -3332,9 +3345,20 @@ pub fn App() -> impl IntoView {
                         } else {
                             view! {
                                 <div class="oracle-input-row">
-                                    <input class="oracle-input" placeholder="ask the oracle about your training…" spellcheck="false"
+                                    <textarea class="oracle-input" rows="1" placeholder="ask the oracle about your training…" spellcheck="false"
+                                        node_ref=oracle_input_ref
                                         prop:value=oracle_input
-                                        on:input=move |ev| set_oracle_input.set(event_target_value(&ev))
+                                        on:input=move |ev| {
+                                            set_oracle_input.set(event_target_value(&ev));
+                                            // Grow with the typed text; scroll once it exceeds the cap.
+                                            if let Some(t) = ev.target() {
+                                                if let Ok(ta) = t.dyn_into::<web_sys::HtmlTextAreaElement>() {
+                                                    let _ = ta.style().set_property("height", "auto");
+                                                    let h = ta.scroll_height();
+                                                    let _ = ta.style().set_property("height", &format!("{}px", h.min(120)));
+                                                }
+                                            }
+                                        }
                                         on:keydown=move |ev: web_sys::KeyboardEvent| {
                                             if ev.key() == "Enter" && !ev.shift_key() {
                                                 ev.prevent_default();

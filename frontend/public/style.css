@@ -816,6 +816,17 @@ select { min-width: 120px; }
   font-family: "IBM Plex Mono", monospace;
   font-size: 12px;
   line-height: 1.5;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+  outline: none;
+}
+.sys-prompt-block textarea:focus {
+  border-color: var(--red-dark);
+}
+.sys-prompt-block textarea::placeholder {
+  color: var(--muted);
 }
 .measure-list { max-height: 260px; }
 
@@ -1332,7 +1343,23 @@ html, body { overflow-x: clip; }
   border-top: 1px solid var(--line);
   flex: none;
 }
-.oracle-input { flex: 1; min-width: 0; }
+.oracle-input {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  max-height: 120px;
+  overflow-y: auto;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  padding: 6px 8px;
+  font-family: "IBM Plex Mono", ui-monospace, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  outline: none;
+}
+.oracle-input:focus { border-color: var(--red-dark); }
+.oracle-input::placeholder { color: var(--muted); }
 
 /* Nomoi: AI provider test/save row. */
 .ai-provider-actions { display: flex; gap: 8px; margin-top: 12px; }
