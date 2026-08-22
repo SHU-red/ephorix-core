@@ -380,7 +380,18 @@ impl Tab {
 /// Dictionary-style hero box: the tab title explained like a lexicon entry.
 #[component]
 fn TabHero(tab: Tab) -> impl IntoView {
-    let helmet = (tab == Tab::Leonidas).then_some("/assets/helmet_transparent.png");
+    // Dictionary art per tab (dict_*.png, same scheme as dict_leonidas).
+    let art = match tab {
+        Tab::Agoges => Some(("/assets/dict_agoge.png", "Agoge")),
+        Tab::Anapavsis => Some(("/assets/dict_anapavsis.png", "Anapavsis")),
+        Tab::Askesis => Some(("/assets/dict_askesis.png", "Askesis")),
+        Tab::Enomotia => Some(("/assets/dict_enomotia.png", "Enomotia")),
+        Tab::Gymnasia => Some(("/assets/dict_gymnasia.png", "Gymnasia")),
+        Tab::Syntaxis => Some(("/assets/dict_syntaxis.png", "Syntaxis")),
+        Tab::Syssitia => Some(("/assets/dict_syssitia.png", "Syssitia")),
+        Tab::Leonidas => Some(("/assets/dict_leonidas.png", "Leonidas")),
+        _ => None,
+    };
     view! {
         <div class="tab-hero">
             <div class="th-body">
@@ -399,8 +410,8 @@ fn TabHero(tab: Tab) -> impl IntoView {
                     <p class="th-def">{tab.definition()}</p>
                     <p class="th-etym">{tab.etymology()}</p>
                 </div>
-                {helmet.map(|src| view! {
-                    <img class="th-hero-img" src=src alt="Spartan helmet" />
+                {art.map(|(src, alt)| view! {
+                    <img class="th-hero-img" src=src alt=alt />
                 })}
             </div>
         </div>
