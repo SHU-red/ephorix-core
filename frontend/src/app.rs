@@ -2147,12 +2147,7 @@ pub fn App() -> impl IntoView {
                     </div>
                     <span class="sub">"ΑΓΩΓΗ · TRAINING COMMAND"</span>
                 </div>
-                <svg class="brand-lambda" viewBox="0 0 120 100" role="img" aria-label="Spartan lambda">
-                    <path fill="#e53935" d="M60 12 L34 73 L26 73 L26 80 L48 80 Z M60 12 L86 73 L94 73 L94 80 L72 80 Z M60 12 L62.5 20 L62.5 85 L57.5 85 L57.5 20 Z M60 85 L66 90.5 L60 96 L54 90.5 Z" />
-                    <path fill="none" stroke="#7b0000" stroke-width="2" d="M50.5 40 L37 71 M53.5 40 L40 71 M69.5 40 L82.7 71 M66.5 40 L79.7 71" />
-                    <path fill="none" stroke="#ff5252" stroke-width="2" d="M60 18 L60 84" />
-                    <path fill="#ff5252" d="M60 5 L64 9 L60 13 L56 9 Z" />
-                </svg>
+                <span class="brand-lambda" inner_html=LAMBDA aria-label="EphoriX"></span>
             </header>
 
             <nav class="tabs">

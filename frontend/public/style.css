@@ -97,9 +97,15 @@ h1, h2, h3 {
    the EPHORIX wordmark. The SVG is transparent, so the pulsing glow in the
    lambda-glow animation traces the spear-lambda mark, not a rectangle. */
 .brand-lambda {
+  display: inline-flex;
   height: 96px;
   width: auto;
+  aspect-ratio: 1 / 1;
   align-self: flex-start;
+}
+.brand-lambda svg {
+  width: 100%;
+  height: 100%;
 }
 .brand h1 {
   display: inline-grid;
