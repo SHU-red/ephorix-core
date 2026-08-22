@@ -274,7 +274,7 @@ select { min-width: 120px; }
 /* ---------------- Timeline ---------------- */
 
 .chart { width: 100%; }
-.session-overlay { position: absolute; pointer-events: none; }
+.session-overlay { position: absolute; z-index: 16; pointer-events: none; }
 
 /* ---------------- Session strip + inline editor (markers) ---------------- */
 
@@ -288,7 +288,7 @@ select { min-width: 120px; }
 .chart-row { display: flex; align-items: stretch; gap: 12px; }
 .chart-row + .chart-row { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 .chart-wrap { position: relative; flex: 1; min-width: 0; }
-.battery-wrap { flex: 1; min-width: 0; }
+.battery-wrap { position: relative; flex: 1; min-width: 0; }
 .legend-sidebar { flex: 0 0 160px; border: 1px solid var(--line); background: var(--panel); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
 .legend-item { display: flex; align-items: center; gap: 8px; font-size: 11px; letter-spacing: 0.08em; }
 .legend-swatch { display: inline-block; width: 10px; height: 10px; flex: 0 0 auto; }
@@ -430,9 +430,50 @@ select { min-width: 120px; }
 .settings-grid input { width: 100%; }
 .selection-readout { align-self: center; min-width: 240px; }
 
-.timeline-actions {
-  display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap;
-  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line);
+/* Chart toolbar: the ZOOM/SELECT mode toggle sits top-left above the chart;
+   the select-mode action cluster (create / close / type / readout) follows it
+   in the same row and only appears while SELECT mode is active. */
+.chart-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+}
+.mode-toggle {
+  display: inline-flex;
+  border: 1px solid var(--red-dark);
+}
+.mode-toggle button {
+  background: #030303;
+  color: var(--muted);
+  border: none;
+  padding: 5px 16px;
+  font-family: "Anton", "Arial Narrow", sans-serif;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+}
+.mode-toggle button:hover:not(.on) { color: var(--red); }
+.mode-toggle button.on { background: var(--red); color: #000; }
+.select-actions {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+/* Persistent selection band: mirrors the SELECT drag range across the main
+   chart, the workout strip, and the body-battery chart. Positioned in JS
+   (valToPos + plot bbox); hidden until a selection exists. Paints above the
+   chart canvas but below the session overlay and hover tooltips. */
+.sel-band {
+  position: absolute;
+  display: none;
+  background: rgba(229, 57, 53, 0.12);
+  border: 1px solid rgba(229, 57, 53, 0.35);
+  pointer-events: none;
+  z-index: 15;
 }
 .cursor-readout { align-self: center; }
 
@@ -775,6 +816,9 @@ html, body { overflow-x: hidden; }
     align-items: center;
   }
   .workout-gutter, .workout-gutter-right { display: none; }
+  /* Chart toolbar wraps; the select-mode cluster stacks under the toggle. */
+  .chart-toolbar { align-items: stretch; }
+  .select-actions { width: 100%; }
 
   /* The Gymnasia KPI strip hard-codes repeat(6, 1fr) inline, which wins over
      the sheet's 2-column fallback — re-assert the fallback above the inline. */

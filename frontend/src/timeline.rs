@@ -96,6 +96,28 @@ struct DragRect {
     dir: String,
 }
 
+/// Plot-relative [left, width] px for a time range on chart `id`, clamped to
+/// the visible plot area (valToPos space, matching `ephorix_plot_bbox`).
+/// None when the chart isn't ready, has no plot area, or the range is
+/// off-screen (< 1px wide after clamping).
+fn selection_band_rect(id: u32, a: f64, b: f64) -> Option<(f64, f64)> {
+    if id == 0 {
+        return None;
+    }
+    let bbox: BBox = serde_json::from_str(&ephorix_plot_bbox(id))
+        .unwrap_or(BBox { left: 0.0, top: 0.0, width: 0.0, height: 0.0 });
+    if bbox.width <= 0.0 {
+        return None;
+    }
+    let x = ephorix_val_to_pos(id, a.min(b)).max(0.0);
+    let x2 = ephorix_val_to_pos(id, a.max(b)).min(bbox.width);
+    let w = x2 - x;
+    if w < 1.0 {
+        return None;
+    }
+    Some((x, w))
+}
+
 #[component]
 pub fn TimelineChart(
     points: ReadSignal<Vec<TimelinePoint>>,
@@ -105,18 +127,24 @@ pub fn TimelineChart(
     sleep: ReadSignal<Vec<SleepDay>>,
     battery: ReadSignal<Vec<BatterySeriesPoint>>,
     series: ReadSignal<SeriesConfig>,
-    selection: WriteSignal<Option<(f64, f64)>>,
+    selection: ReadSignal<Option<(f64, f64)>>,
+    set_selection: WriteSignal<Option<(f64, f64)>>,
     cursor: WriteSignal<Option<f64>>,
     pick_mode: ReadSignal<bool>,
     zoom_mode: ReadSignal<bool>,
     clear_trigger: RwSignal<u32>,
     reset_zoom: RwSignal<u32>,
     on_click_at: Callback<f64>,
+    on_zoom: Callback<()>,
     on_ready: Callback<u32>,
     on_session_click: Callback<String>,
 ) -> impl IntoView {
     let chart_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let overlay_ref: NodeRef<leptos::html::Div> = create_node_ref();
+    // Persistent selection band nodes (main chart / workout strip / battery).
+    let band_main_ref: NodeRef<leptos::html::Div> = create_node_ref();
+    let band_strip_ref: NodeRef<leptos::html::Div> = create_node_ref();
+    let band_battery_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let chart_id = create_rw_signal(0u32);
     let battery_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let battery_id = create_rw_signal(0u32);
@@ -181,8 +209,10 @@ pub fn TimelineChart(
                 let Ok(r) = serde_json::from_str::<DragRect>(&json) else { return };
                 if zoom_mode.get_untracked() {
                     ephorix_zoom_to(id, r.x0, r.x1, r.y0, r.y1, &r.dir);
+                    // Manual zoom desyncs the parent's range-chip highlight.
+                    on_zoom.call(());
                 } else {
-                    selection.set(Some((r.x0, r.x1)));
+                    set_selection.set(Some((r.x0, r.x1)));
                 }
             }) as Box<dyn FnMut(String)>);
             ephorix_on_drag(id, drag_cb.as_ref().unchecked_ref());
@@ -287,6 +317,69 @@ pub fn TimelineChart(
         let _ = zoom_version.get();
         if let Some(strip) = workout_ref.get() {
             render_workout_strip(&strip, id, &sess, &ty);
+        }
+    });
+
+    // Persistent selection band: a translucent red band across the main chart,
+    // the workout strip, and the body-battery chart. Repositioned whenever the
+    // selection or the x-scale changes (zoom/reset/data resync); hidden when
+    // there is no selection. The strip band is re-appended when a strip
+    // re-render detached it (render_workout_strip clears the strip's innerHTML).
+    create_effect(move |_| {
+        let sel = selection.get();
+        let _ = zoom_version.get();
+        let _ = sessions.get();
+        let _ = types.get();
+        let main_id = chart_id.get();
+        let bat_id = battery_id.get();
+
+        // Main chart band: absolute inside .chart-wrap, offset to the plot bbox.
+        if let Some(band) = band_main_ref.get() {
+            if let Some((x, w)) = sel.and_then(|(a, b)| selection_band_rect(main_id, a, b)) {
+                let bbox: BBox = serde_json::from_str(&ephorix_plot_bbox(main_id))
+                    .unwrap_or(BBox { left: 0.0, top: 0.0, width: 0.0, height: 0.0 });
+                let _ = band.set_attribute(
+                    "style",
+                    &format!(
+                        "left:{}px;top:{}px;width:{}px;height:{}px;display:block;",
+                        bbox.left + x, bbox.top, w, bbox.height
+                    ),
+                );
+            } else {
+                let _ = band.set_attribute("style", "display:none");
+            }
+        }
+        // Workout strip band: plot-relative x, full strip height.
+        if let Some(band) = band_strip_ref.get() {
+            if let Some((x, w)) = sel.and_then(|(a, b)| selection_band_rect(main_id, a, b)) {
+                if !band.is_connected() {
+                    if let Some(strip) = workout_ref.get() {
+                        let _ = strip.append_child(&band);
+                    }
+                }
+                let _ = band.set_attribute(
+                    "style",
+                    &format!("left:{x}px;top:0;width:{w}px;height:100%;display:block;"),
+                );
+            } else {
+                let _ = band.set_attribute("style", "display:none");
+            }
+        }
+        // Battery chart band: absolute inside .battery-wrap, offset to its bbox.
+        if let Some(band) = band_battery_ref.get() {
+            if let Some((x, w)) = sel.and_then(|(a, b)| selection_band_rect(bat_id, a, b)) {
+                let bbox: BBox = serde_json::from_str(&ephorix_plot_bbox(bat_id))
+                    .unwrap_or(BBox { left: 0.0, top: 0.0, width: 0.0, height: 0.0 });
+                let _ = band.set_attribute(
+                    "style",
+                    &format!(
+                        "left:{}px;top:{}px;width:{}px;height:{}px;display:block;",
+                        bbox.left + x, bbox.top, w, bbox.height
+                    ),
+                );
+            } else {
+                let _ = band.set_attribute("style", "display:none");
+            }
         }
     });
 
@@ -398,6 +491,7 @@ pub fn TimelineChart(
             <div class="chart-wrap">
                 <div node_ref=chart_ref class="chart" id="ephorix-chart"></div>
                 <div node_ref=overlay_ref class="session-overlay" on:click=on_marker_click></div>
+                <div node_ref=band_main_ref class="sel-band"></div>
                 <Show when=move || points.get().is_empty() fallback=|| ()>
                     <div class="chart-empty">
                         <span class="chart-empty-mark" inner_html=crate::icons::LAMBDA></span>
@@ -425,7 +519,9 @@ pub fn TimelineChart(
         </div>
         <div class="workout-row">
             <div class="workout-gutter"></div>
-            <div node_ref=workout_ref class="workout-strip" on:click=on_marker_click on:pointerenter=on_workout_popup.clone() on:pointermove=on_workout_popup.clone() on:pointerleave=on_workout_popup_leave.clone()></div>
+            <div node_ref=workout_ref class="workout-strip" on:click=on_marker_click on:pointerenter=on_workout_popup.clone() on:pointermove=on_workout_popup.clone() on:pointerleave=on_workout_popup_leave.clone()>
+                <div node_ref=band_strip_ref class="sel-band"></div>
+            </div>
             <div class="workout-gutter-right"></div>
             <aside class="legend-sidebar">
                 <div class="legend-item">
@@ -436,6 +532,7 @@ pub fn TimelineChart(
         <div class="chart-row">
             <div class="battery-wrap">
                 <div node_ref=battery_ref class="chart" id="ephorix-battery-chart"></div>
+                <div node_ref=band_battery_ref class="sel-band"></div>
             </div>
             <aside class="legend-sidebar">
                 <div class="legend-item">

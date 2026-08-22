@@ -552,6 +552,9 @@ pub fn App() -> impl IntoView {
     let (settings_loaded, set_settings_loaded) = create_signal(false);
     let clear_sel = create_rw_signal(0u32);
     let reset_zoom = create_rw_signal(0u32);
+    // Highlighted range chip (None = nothing highlighted: a manual zoom
+    // desyncs the chips from the actual x-domain until a preset is re-picked).
+    let active_range = create_rw_signal(None::<i64>);
     let (selected_id, set_selected_id) = create_signal(None::<String>);
     let selected_session = create_rw_signal(None::<AgogeSession>);
     // Graphical start/end picking for the details panel: which bound a chart
@@ -835,45 +838,19 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    let clear_selection = move |_| {
-        clear_sel.set(clear_sel.get() + 1);
-        set_selection.set(None);
-    };
-
-    let close_open_at_cursor = move |_| {
-        let Some(ts) = cursor.get() else {
-            set_error.set(Some("move the cursor over the timeline first".to_string()));
-            return;
-        };
+    // "SET CLOSE POINT": targets the user's OPEN agoge session — selects it,
+    // cancels any other pick, and enters End-pick mode. The next chart click
+    // closes the session at that time (see handle_chart_click).
+    let begin_close_open = move |_| {
         let Some(open) = sessions.get().into_iter().find(|s| s.status == "active") else {
             set_error.set(Some("no open agoge session".to_string()));
             return;
         };
-        let base = base.get();
-        let token = token.get();
-        let end = iso_from_ms(ts);
-        let url = format!("/api/v1/agoge-sessions/{}", open.id);
-        spawn_local(async move {
-            match patch_json(&base, &token, &url, &json!({ "endTime": end })).await {
-                Ok(_) => {
-                    // Keep the marker event stream complete for retro-analysis.
-                    let _ = post_json(
-                        &base,
-                        &token,
-                        "/api/v1/events/marker",
-                        &json!({
-                            "kind": "stop",
-                            "sessionId": open.id,
-                            "occurredAt": end,
-                            "source": "web"
-                        }),
-                    )
-                    .await;
-                    refresh();
-                }
-                Err(e) => set_error.set(Some(e)),
-            }
-        });
+        set_pick_field.set(None);
+        set_pick_mode.set(false);
+        selected_session.set(Some(open));
+        set_pick_field.set(Some(PickField::End));
+        set_pick_mode.set(true);
     };
 
     let set_range_days = move |d: i64| {
@@ -907,47 +884,51 @@ pub fn App() -> impl IntoView {
     };
 
     // Clean left-click on empty plot area: in pick mode it plants the picked
-    // start/end on the selected session; otherwise it creates an open session
-    // at that ts.
+    // start/end on the selected session — an End pick on the open session also
+    // posts the stop marker (mirrors the close-open flow). Without a pick
+    // active, a clean click does nothing: sessions are only created via
+    // "CREATE AGOGE FROM SELECTION", never by an accidental chart click.
     let handle_chart_click = move |ts: f64| {
-        if let Some(field) = pick_field.get() {
-            let Some(s) = selected_session.get() else {
-                end_pick();
-                return;
-            };
-            let base = base.get();
-            let token = token.get();
-            let body = match field {
-                PickField::Start => json!({ "startTime": iso_from_ms(ts) }),
-                PickField::End => json!({ "endTime": iso_from_ms(ts) }),
-            };
-            let id = s.id.clone();
-            end_pick();
-            spawn_local(async move {
-                match patch_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}"), &body).await {
-                    Ok(_) => {
-                        selected_session.set(None);
-                        refresh();
-                    }
-                    Err(e) => set_error.set(Some(e)),
-                }
-            });
+        let Some(field) = pick_field.get() else {
             return;
-        }
-        let Some(type_id) = selected_type.get() else {
-            set_error.set(Some("select a type first".to_string()));
+        };
+        let Some(s) = selected_session.get() else {
+            end_pick();
             return;
         };
         let base = base.get();
         let token = token.get();
-        let body = json!({
-            "typeId": type_id,
-            "startTime": iso_from_ms(ts),
-            "endTime": null,
-        });
+        let is_end = field == PickField::End;
+        let end = iso_from_ms(ts);
+        let body = match field {
+            PickField::Start => json!({ "startTime": iso_from_ms(ts) }),
+            PickField::End => json!({ "endTime": end.clone() }),
+        };
+        let id = s.id.clone();
+        end_pick();
         spawn_local(async move {
-            match post_json(&base, &token, "/api/v1/agoge-sessions", &body).await {
-                Ok(_) => refresh(),
+            if is_end {
+                // Keep the marker event stream complete for retro-analysis
+                // (mirrors the removed close_open_at_cursor flow; ignore
+                // marker failures).
+                let _ = post_json(
+                    &base,
+                    &token,
+                    "/api/v1/events/marker",
+                    &json!({
+                        "kind": "stop",
+                        "sessionId": id.clone(),
+                        "occurredAt": end,
+                        "source": "web"
+                    }),
+                )
+                .await;
+            }
+            match patch_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}"), &body).await {
+                Ok(_) => {
+                    selected_session.set(None);
+                    refresh();
+                }
                 Err(e) => set_error.set(Some(e)),
             }
         });
@@ -1304,9 +1285,6 @@ pub fn App() -> impl IntoView {
             set_importing.set(false);
         });
     };
-
-    let toggle_zoom_mode = move |_| set_zoom_mode.update(|v| *v = !*v);
-    let do_reset_zoom = move |_| reset_zoom.set(reset_zoom.get() + 1);
 
     // -- Pythia oracle (AI chat panel) ----------------------------------------
 
@@ -1748,7 +1726,15 @@ pub fn App() -> impl IntoView {
                                     {RANGES.iter().map(|(d, label)| {
                                         let d = *d;
                                         view! {
-                                            <button class="pill" class:on=move || days.get() == d on:click=move |_| set_range_days(d)>{*label}</button>
+                                            <button class="pill" class:on=move || active_range.get() == Some(d) on:click=move |_| {
+                                                set_range_days(d);
+                                                active_range.set(Some(d));
+                                                // The preset also resets the zoom (refetch follows via
+                                                // the days signal) and clears any selection.
+                                                reset_zoom.set(reset_zoom.get() + 1);
+                                                clear_sel.set(clear_sel.get() + 1);
+                                                set_selection.set(None);
+                                            }>{*label}</button>
                                         }
                                     }).collect_view()}
                                     <span class="muted cursor-readout">
@@ -1756,6 +1742,38 @@ pub fn App() -> impl IntoView {
                                         {move || cursor.get().map(fmt_time).unwrap_or_else(|| "—".to_string())}
                                     </span>
                                 </div>
+                            </div>
+                            <div class="chart-toolbar">
+                                <div class="mode-toggle">
+                                    <button class:on=move || zoom_mode.get() on:click=move |_| {
+                                        // Switching back to ZOOM clears any pending selection.
+                                        if !zoom_mode.get() {
+                                            clear_sel.set(clear_sel.get() + 1);
+                                            set_selection.set(None);
+                                        }
+                                        set_zoom_mode.set(true);
+                                    }>"ZOOM"</button>
+                                    <button class:on=move || !zoom_mode.get() on:click=move |_| set_zoom_mode.set(false)>"SELECT"</button>
+                                </div>
+                                <Show when=move || !zoom_mode.get() fallback=|| ()>
+                                    <div class="select-actions">
+                                        <button class="btn" on:click=create_from_selection>"CREATE AGOGE FROM SELECTION"</button>
+                                        <button class="btn" on:click=begin_close_open>"SET CLOSE POINT"</button>
+                                        <label class="ctl">
+                                            "TYPE"
+                                            <select on:change=move |ev| set_selected_type.set(option_value(&ev))>
+                                                <option value="">"UNDEFINED"</option>
+                                                <For each=move || types.get() key=|t| t.id.clone() let:t>
+                                                    <option value=t.id.clone()>{t.name.clone()}</option>
+                                                </For>
+                                            </select>
+                                        </label>
+                                        <span class="muted selection-readout">
+                                            "SELECTION: "
+                                            {move || selection.get().map(|(f, t)| format!("{} → {}", fmt_time(f.min(t)), fmt_time(f.max(t)))).unwrap_or_else(|| "—".to_string())}
+                                        </span>
+                                    </div>
+                                </Show>
                             </div>
                             <TimelineChart
                                 points=points
@@ -1765,13 +1783,15 @@ pub fn App() -> impl IntoView {
                                 sleep=sleep
                                 battery=battery_series
                                 series=series
-                                selection=set_selection
+                                selection=selection
+                                set_selection=set_selection
                                 cursor=set_cursor
                                 pick_mode=pick_mode
                                 zoom_mode=zoom_mode
                                 clear_trigger=clear_sel
                                 reset_zoom=reset_zoom
                                 on_click_at=Callback::new(move |ts| handle_chart_click(ts))
+                                on_zoom=Callback::new(move |_| active_range.set(None))
                                 on_ready=Callback::new(move |id| handle_chart_ready(id))
                                 on_session_click=Callback::new(move |sid| handle_session_click(sid))
                             />
@@ -1790,27 +1810,6 @@ pub fn App() -> impl IntoView {
                                     <SessionChip session=s types=types on_open=Callback::new(move |s: AgogeSession| handle_session_click(s.id.clone())) />
                                 </For>
                             </div>
-                            <div class="timeline-actions">
-                                <button class="btn" class:on=move || !zoom_mode.get() on:click=toggle_zoom_mode>
-                                    {move || if zoom_mode.get() { "DRAG = ZOOM" } else { "DRAG = SELECT" }}
-                                </button>
-                                <button class="btn" on:click=do_reset_zoom>"RESET ZOOM"</button>
-                                <button class="btn" on:click=create_from_selection>"CREATE SESSION FROM SELECTION"</button>
-                                <button class="btn" on:click=clear_selection>"CLEAR SELECTION"</button>
-                                <button class="btn" on:click=close_open_at_cursor>"CLOSE OPEN AT CURSOR"</button>
-                                <label class="ctl">
-                                    "TYPE"
-                                    <select on:change=move |ev| set_selected_type.set(option_value(&ev))>
-                                        <option value="">"UNDEFINED"</option>
-                                        <For each=move || types.get() key=|t| t.id.clone() let:t>
-                                            <option value=t.id.clone()>{t.name.clone()}</option>
-                                        </For>
-                                    </select>
-                                </label>
-                                <span class="muted selection-readout">
-                                    "SELECTION: "
-                                    {move || selection.get().map(|(f, t)| format!("{} → {}", fmt_time(f.min(t)), fmt_time(f.max(t)))).unwrap_or_else(|| "—".to_string())}
-                                </span>
                             <Show when=move || selected_session.get().is_some() fallback=|| ()>
                                 {move || {
                                     let s = selected_session.get().unwrap();
@@ -1832,7 +1831,6 @@ pub fn App() -> impl IntoView {
                                     }
                                 }}
                             </Show>
-                            </div>
                         </section>
                     }.into_view(),
 
