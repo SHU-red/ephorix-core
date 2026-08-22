@@ -14,6 +14,8 @@ pub enum ApiError {
     Unauthorized(String),
     #[error("{0}")]
     NotFound(String),
+    #[error("{0}")]
+    Conflict(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -26,6 +28,7 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, "bad_request", m),
             ApiError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, "unauthorized", m),
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, "not_found", m),
+            ApiError::Conflict(m) => (StatusCode::CONFLICT, "conflict", m),
             ApiError::Db(e) => {
                 tracing::error!("database error: {e}");
                 (

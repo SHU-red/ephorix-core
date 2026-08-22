@@ -368,6 +368,16 @@ pub struct AiProposal {
     pub proposed: Value,
     #[serde(default)]
     pub reason: String,
+    /// "measurement" | "meal" when this is an action proposal (accepted by
+    /// POSTing to /measurements or /nutrition instead of a settings PUT).
+    #[serde(default)]
+    pub action: Option<String>,
+    /// "weight_kg" | "body_fat_pct" for measurement proposals.
+    #[serde(default)]
+    pub metric: Option<String>,
+    /// Suggested numeric value for action proposals (kcal for meals).
+    #[serde(default)]
+    pub value: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -596,6 +606,105 @@ pub async fn fetch_daily_nutrition(
 /// entry as a meal), `note`, `consumedAt`.
 pub async fn add_nutrition(base: &str, token: &str, body: &Value) -> Result<Value, String> {
     post_json(base, token, "/api/v1/nutrition", body).await
+}
+
+// ---------------------------------------------------------------------------
+// User-logged measurements (weight / body fat) + persisted action log
+// ---------------------------------------------------------------------------
+
+/// One row from `GET /api/v1/measurements` (newest first when `limit` is set).
+/// `ts` may be an epoch-ms number (the long-form store) or an ISO string —
+/// `ts_ms()` normalizes both for display.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Measurement {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub metric: String,
+    pub value: f64,
+    #[serde(default)]
+    pub ts: Value,
+}
+
+impl Measurement {
+    pub fn ts_ms(&self) -> Option<f64> {
+        match &self.ts {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => ms_from_iso(s),
+            _ => None,
+        }
+    }
+}
+
+/// POST /api/v1/measurements {metric, value, ts?} — logs a user measurement.
+pub async fn post_measurement(
+    base: &str,
+    token: &str,
+    metric: &str,
+    value: f64,
+    ts: Option<String>,
+) -> Result<Value, String> {
+    let mut body = json!({ "metric": metric, "value": value });
+    if let Some(t) = ts {
+        body["ts"] = json!(t);
+    }
+    post_json(base, token, "/api/v1/measurements", &body).await
+}
+
+/// GET /api/v1/measurements?metric=&limit= — rows newest first.
+pub async fn fetch_measurements(
+    base: &str,
+    token: &str,
+    metric: &str,
+    limit: usize,
+) -> Result<Vec<Measurement>, String> {
+    let limit_s = limit.to_string();
+    let v = Request::get(&format!("{base}/api/v1/measurements"))
+        .header("X-EphoriX-Token", token)
+        .query([("metric", metric), ("limit", limit_s.as_str())])
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("invalid json: {e}"))?;
+    // The store returns rows under "points"; newer endpoints may use
+    // "measurements" or a bare array — accept all three.
+    let arr = v.get("measurements").or_else(|| v.get("points")).cloned().unwrap_or(v);
+    serde_json::from_value(arr).map_err(|e| format!("measurements decode: {e}"))
+}
+
+/// One persisted action from `GET /api/v1/actions` (settings PUTs, nutrition
+/// POSTs, measurement POSTs are auto-logged server-side).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionLogEntry {
+    pub id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub payload: Value,
+    pub created_at: String,
+    #[serde(default)]
+    pub reverted_at: Option<String>,
+}
+
+pub async fn fetch_actions(base: &str, token: &str) -> Result<Vec<ActionLogEntry>, String> {
+    let v = Request::get(&format!("{base}/api/v1/actions"))
+        .header("X-EphoriX-Token", token)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("invalid json: {e}"))?;
+    serde_json::from_value(v["actions"].clone()).map_err(|e| format!("actions decode: {e}"))
+}
+
+/// POST /api/v1/actions/{id}/revert — undoes one logged action.
+pub async fn revert_action(base: &str, token: &str, id: &str) -> Result<Value, String> {
+    post_json(base, token, &format!("/api/v1/actions/{id}/revert"), &json!({})).await
 }
 
 // ---------------------------------------------------------------------------

@@ -95,12 +95,20 @@ pub async fn ingest(
 
 #[derive(Debug, Deserialize)]
 pub struct MeasurementsQuery {
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
+    /// Inclusive lower bound. Required unless `limit` is given.
+    #[serde(default)]
+    pub from: Option<DateTime<Utc>>,
+    /// Exclusive upper bound. Required unless `limit` is given.
+    #[serde(default)]
+    pub to: Option<DateTime<Utc>>,
     #[serde(default)]
     pub metric: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// When given, returns the newest `limit` rows (newest first) — the
+    /// latest-value lookup shape used by `GET /api/v1/measurements?metric=..&limit=..`.
+    #[serde(default)]
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -118,10 +126,47 @@ pub async fn list_measurements(
     Extension(user): Extension<AuthUser>,
     Query(q): Query<MeasurementsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if q.to <= q.from {
+    // Latest-N lookup: `?metric=..&limit=..` (optionally with from/to as
+    // filters) returns the newest rows first.
+    if let Some(limit) = q.limit {
+        let limit = limit.clamp(1, 20000);
+        let rows: Vec<MeasurementPoint> = sqlx::query_as(
+            "SELECT
+                (EXTRACT(EPOCH FROM ts) * 1000)::float8 AS ts,
+                source,
+                metric,
+                value,
+                unit
+             FROM measurements
+             WHERE user_id = $1
+               AND ($2::timestamptz IS NULL OR ts >= $2)
+               AND ($3::timestamptz IS NULL OR ts < $3)
+               AND ($4::text IS NULL OR metric = $4)
+               AND ($5::text IS NULL OR source = $5)
+             ORDER BY ts DESC
+             LIMIT $6",
+        )
+        .bind(user.0)
+        .bind(q.from)
+        .bind(q.to)
+        .bind(&q.metric)
+        .bind(&q.source)
+        .bind(limit)
+        .fetch_all(&pool)
+        .await?;
+        return Ok(Json(json!({ "points": rows })));
+    }
+
+    let Some(from) = q.from else {
+        return Err(ApiError::BadRequest("'from' is required".to_string()));
+    };
+    let Some(to) = q.to else {
+        return Err(ApiError::BadRequest("'to' is required".to_string()));
+    };
+    if to <= from {
         return Err(ApiError::BadRequest("'to' must be after 'from'".to_string()));
     }
-    if (q.to - q.from) > Duration::days(MAX_QUERY_DAYS) {
+    if (to - from) > Duration::days(MAX_QUERY_DAYS) {
         return Err(ApiError::BadRequest(format!("range exceeds {MAX_QUERY_DAYS} days")));
     }
 
@@ -142,8 +187,8 @@ pub async fn list_measurements(
          LIMIT 20000",
     )
     .bind(user.0)
-    .bind(q.from)
-    .bind(q.to)
+    .bind(from)
+    .bind(to)
     .bind(&q.metric)
     .bind(&q.source)
     .fetch_all(&pool)

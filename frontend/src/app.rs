@@ -91,6 +91,12 @@ struct OracleProposalRow {
     draft: String,
     input: ProposalInput,
     checked: bool,
+    /// "measurement" | "meal" when accepting POSTs data instead of settings.
+    action: Option<String>,
+    /// "weight_kg" | "body_fat_pct" for measurement proposals.
+    metric: Option<String>,
+    /// Suggested numeric value for action proposals (kcal for meals).
+    value: Option<f64>,
 }
 
 /// Write `value` at a dotted path ("series.heartRate") inside a settings
@@ -245,7 +251,7 @@ impl Tab {
             Tab::Enomotia => "The sworn band, the smallest Spartan unit, ~36 men bound by oath. Link accounts, compare, and challenge your sworn brothers.",
             Tab::Syssitia => "The common mess — the daily meal shared by Spartan men. Log your food, water, and supplements; the AI estimates what you ate.",
             Tab::Rank => "Station in the line. The ladder of workout success — Hoplite, Paidonomos, Mothax, Hippeis. Earn your rank through discipline, not birth.",
-            Tab::Anapavsis => "Rest, refreshment, recovery. Your body battery: how much the night restored and how much the day's askesis drained.",
+            Tab::Anapavsis => "Rest, refreshment, recovery. Your DYNAMIS: how much the night restored and how much the day's askesis drained.",
             Tab::Nomoi => "The laws — the customs of Lycurgus. The rules that govern this machine: API, token, AI providers.",
             Tab::Skopos => "The watcher, the sentinel, the mark. Every API call, settings change, and interaction — watched and recorded, like the ephors watch the agoge.",
         }
@@ -361,6 +367,17 @@ fn goal_f64(s: &str, fallback: f64) -> f64 {
 /// Progress-bar width percent, capped at 100 like the other target bars.
 fn goal_pct(have: f64, goal: f64) -> f64 {
     if goal <= 0.0 { 0.0 } else { (have / goal * 100.0).min(100.0) }
+}
+
+/// Monday 00:00 local of the ISO week containing `now_ms` — the anchor for
+/// the weekly intensity-hour total (week starts Monday).
+fn week_start_ms(now_ms: f64) -> f64 {
+    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(now_ms));
+    // get_day(): 0 = Sunday … 6 = Saturday → days since Monday.
+    let since_monday = (d.get_day() as f64 + 6.0) % 7.0;
+    d.set_hours(0);
+    d.set_minutes(0);
+    d.get_time() - since_monday * 86_400_000.0
 }
 
 /// One-line label for a logged entry in the Syssitia list.
@@ -581,6 +598,9 @@ pub fn App() -> impl IntoView {
     let (baselines, set_baselines) = create_signal(None::<Baselines>);
     let (log, set_log) = create_signal(Vec::<LogEntry>::new());
     let log_counter = create_rw_signal(0u64);
+    // Persisted action log (Skopos): server-logged settings/nutrition/measurement
+    // actions with REVERT — distinct from the in-memory event feed above.
+    let (actions, set_actions) = create_signal(Vec::<ActionLogEntry>::new());
     let log_event = move |kind: &'static str, msg: &str| {
         let id = log_counter.get();
         log_counter.set(id + 1);
@@ -599,6 +619,14 @@ pub fn App() -> impl IntoView {
     let (target_steps, set_target_steps) = create_signal(10_000i64);
     let (target_kcal, set_target_kcal) = create_signal(500i64);
     let (target_sleep, set_target_sleep) = create_signal(8.0f64);
+    let (target_intensity, set_target_intensity) = create_signal(6.0f64); // intensityHoursPerWeek
+    let (target_weight, set_target_weight) = create_signal(82.0f64);      // weightKg
+    let (target_body_fat, set_target_body_fat) = create_signal(15.0f64);  // bodyFatPct
+    // Leonidas measurements: user-logged weight/body-fat + entry drafts.
+    let (measurements, set_measurements) = create_signal(Vec::<Measurement>::new());
+    let (meas_weight, set_meas_weight) = create_signal(String::new());
+    let (meas_body_fat, set_meas_body_fat) = create_signal(String::new());
+    let meas_refresh = create_rw_signal(0u32);
     // Syssitia manual entry.
     let (manual_kind, set_manual_kind) = create_signal("food".to_string());
     let (manual_amount, set_manual_amount) = create_signal(String::new());
@@ -651,7 +679,14 @@ pub fn App() -> impl IntoView {
         let s = series.get();
         let d = days.get();
         let ai = json!({ "provider": ai_provider.get(), "baseUrl": ai_base.get(), "model": ai_model.get(), "apiKey": ai_key.get() });
-        let targets = json!({ "steps": target_steps.get(), "kcal": target_kcal.get(), "sleepH": target_sleep.get() });
+        let targets = json!({
+            "steps": target_steps.get(),
+            "kcal": target_kcal.get(),
+            "sleepH": target_sleep.get(),
+            "intensityHoursPerWeek": target_intensity.get(),
+            "weightKg": target_weight.get(),
+            "bodyFatPct": target_body_fat.get(),
+        });
         spawn_local(async move {
             let body = json!({
                 "series": s,
@@ -756,6 +791,9 @@ pub fn App() -> impl IntoView {
                         set_target_steps.set(t.get("steps").and_then(|v| v.as_i64()).unwrap_or(10_000));
                         set_target_kcal.set(t.get("kcal").and_then(|v| v.as_i64()).unwrap_or(500));
                         set_target_sleep.set(t.get("sleepH").and_then(|v| v.as_f64()).unwrap_or(8.0));
+                        set_target_intensity.set(t.get("intensityHoursPerWeek").and_then(|v| v.as_f64()).unwrap_or(6.0));
+                        set_target_weight.set(t.get("weightKg").and_then(|v| v.as_f64()).unwrap_or(82.0));
+                        set_target_body_fat.set(t.get("bodyFatPct").and_then(|v| v.as_f64()).unwrap_or(15.0));
                     }
                     if let Some(n) = sv.get("nutrition") {
                         if let Some(v) = n.get("waterGoalMl").and_then(|v| v.as_f64()) {
@@ -1284,6 +1322,115 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // -- Leonidas measurements + persisted action log -------------------------
+
+    // Weekly intensity hours from CLOSED agoge sessions whose start falls in
+    // the current ISO week (duration_sec comes from the watch stop summary).
+    let week_intensity_h = move || {
+        let ws = week_start_ms(js_sys::Date::now());
+        let we = ws + 7.0 * 86_400_000.0;
+        let mut secs = 0i64;
+        for s in sessions.get() {
+            if s.status == "active" {
+                continue;
+            }
+            if let Some(start) = ms_from_iso(&s.start_time) {
+                if start >= ws && start < we {
+                    secs += s.duration_sec.unwrap_or(0);
+                }
+            }
+        }
+        secs as f64 / 3600.0
+    };
+
+    // Recent weight/body-fat measurements (newest first), refetched after
+    // every measurement POST (and whenever base/token change).
+    create_effect(move |_| {
+        let _ = meas_refresh.get();
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            let mut rows = Vec::new();
+            for metric in ["weight_kg", "body_fat_pct"] {
+                match fetch_measurements(&base, &token, metric, 10).await {
+                    Ok(rs) => rows.extend(rs),
+                    Err(_) => {}
+                }
+            }
+            rows.sort_by(|a, b| {
+                b.ts_ms()
+                    .unwrap_or(0.0)
+                    .partial_cmp(&a.ts_ms().unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            set_measurements.set(rows);
+        });
+    });
+
+    // Persisted action log (Skopos): fetched on tab load + after every apply.
+    let refresh_actions = move || {
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            match fetch_actions(&base, &token).await {
+                Ok(a) => set_actions.set(a),
+                Err(e) => log_event("api", &format!("action log fetch failed: {e}")),
+            }
+        });
+    };
+    create_effect(move |_| {
+        if current_tab.get() == Tab::Skopos {
+            refresh_actions();
+        }
+    });
+
+    let revert_action_fn = move |id: String| {
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            match revert_action(&base, &token, &id).await {
+                Ok(_) => {
+                    log_event("action", &format!("reverted action {id}"));
+                    refresh_actions();
+                    refresh();
+                    meas_refresh.set(meas_refresh.get() + 1);
+                    nut_refresh.set(nut_refresh.get() + 1);
+                }
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    };
+
+    // LOG button for the MEASUREMENTS section: POST then refresh the list.
+    let log_measurement = move |metric: &'static str| {
+        let val: f64 = if metric == "weight_kg" {
+            meas_weight.get().trim().parse().unwrap_or(0.0)
+        } else {
+            meas_body_fat.get().trim().parse().unwrap_or(0.0)
+        };
+        if val <= 0.0 {
+            set_error.set(Some("enter a value first".to_string()));
+            return;
+        }
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            match post_measurement(&base, &token, metric, val, None).await {
+                Ok(_) => {
+                    log_event("measurement", &format!("logged {metric} {val:.1}"));
+                    if metric == "weight_kg" {
+                        set_meas_weight.set(String::new());
+                    } else {
+                        set_meas_body_fat.set(String::new());
+                    }
+                    refresh_actions();
+                    meas_refresh.set(meas_refresh.get() + 1);
+                }
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    };
+
     // -- Nomoi import: parse picked file client-side, preview, POST /import --
 
     let on_import_file = move |ev: web_sys::Event| {
@@ -1402,9 +1549,15 @@ pub fn App() -> impl IntoView {
         };
         vec![
             ("READINESS".into(), ready.map(|r| format!("{:.0} / 300", r.score)).unwrap_or_else(|| "—".into())),
-            ("BATTERY".into(), be.as_ref().map(|b| format!("{:.0} / 300", b.score)).unwrap_or_else(|| "—".into())),
-            ("STRESS".into(), be.as_ref().map(|b| format!("{:.0} pts", b.stress)).unwrap_or_else(|| "—".into())),
+            ("DYNAMIS".into(), be.as_ref().map(|b| format!("{:.0} / 300", b.score)).unwrap_or_else(|| "—".into())),
+            ("PONOS".into(), be.as_ref().map(|b| format!("{:.0} pts", b.stress)).unwrap_or_else(|| "—".into())),
             ("SLEEP".into(), sleep_h.map(|h| format!("{h:.1} h")).unwrap_or_else(|| "—".into())),
+            ("GOALS".into(), format!("{:.0}h · {:.0}kg · {:.0}%", target_intensity.get(), target_weight.get(), target_body_fat.get())),
+            ("MEASURE".into(), {
+                let w = measurements.get().into_iter().find(|m| m.metric == "weight_kg").map(|m| format!("{:.1} kg", m.value)).unwrap_or_else(|| "—".to_string());
+                let f = measurements.get().into_iter().find(|m| m.metric == "body_fat_pct").map(|m| format!("{:.1} %", m.value)).unwrap_or_else(|| "—".to_string());
+                format!("{w} · {f}")
+            }),
             ("SESSION".into(), session_line),
             ("NUTRITION".into(), nut_daily.get().map(|n| format!("{:.0} kcal · {:.0} ml", n.kcal, n.water_ml)).unwrap_or_else(|| "—".into())),
         ]
@@ -1469,7 +1622,19 @@ pub fn App() -> impl IntoView {
                 "fat": n.fat,
                 "waterMl": n.water_ml,
             })),
-            "targets": { "steps": target_steps.get(), "kcal": target_kcal.get(), "sleepH": target_sleep.get() },
+            "targets": {
+                "steps": target_steps.get(),
+                "kcal": target_kcal.get(),
+                "sleepH": target_sleep.get(),
+                "intensityHoursPerWeek": target_intensity.get(),
+                "weightKg": target_weight.get(),
+                "bodyFatPct": target_body_fat.get(),
+            },
+            "weekIntensityH": week_intensity_h(),
+            "measurements": {
+                "weightKg": measurements.get().iter().find(|m| m.metric == "weight_kg").map(|m| m.value),
+                "bodyFatPct": measurements.get().iter().find(|m| m.metric == "body_fat_pct").map(|m| m.value),
+            },
             "series": { "heartRate": sc.heart_rate, "steps": sc.steps, "calories": sc.calories },
             "aiProviderModel": ai_model.get(),
         })
@@ -1528,6 +1693,9 @@ pub fn App() -> impl IntoView {
                                     draft: proposal_draft(&p.proposed),
                                     input,
                                     checked: true,
+                                    action: p.action.clone(),
+                                    metric: p.metric.clone(),
+                                    value: p.value,
                                 }
                             })
                             .collect(),
@@ -1557,11 +1725,10 @@ pub fn App() -> impl IntoView {
     // (possibly adjusted) value at its dotted key path, PUT it back, then
     // refresh so KPIs/charts reflect the change.
     let oracle_accept = move |_| {
-        let accepted: Vec<(String, String, ProposalInput)> = oracle_proposals
+        let accepted: Vec<OracleProposalRow> = oracle_proposals
             .get()
             .into_iter()
             .filter(|p| p.checked)
-            .map(|p| (p.key, p.draft, p.input))
             .collect();
         set_oracle_proposals.set(Vec::new());
         if accepted.is_empty() {
@@ -1575,61 +1742,145 @@ pub fn App() -> impl IntoView {
                 settings = json!({});
             }
             let mut applied = 0usize;
-            for (key, draft, kind) in &accepted {
-                let path = key.strip_prefix("settings.").unwrap_or(key);
-                let value: Value = match kind {
-                    ProposalInput::Bool => json!(draft.trim() == "true"),
-                    ProposalInput::Days => draft.trim().parse::<i64>().map(Value::from).unwrap_or(Value::Null),
-                    ProposalInput::Number => draft.trim().parse::<f64>().map(Value::from).unwrap_or(Value::Null),
-                    ProposalInput::Text => json!(draft),
-                };
-                if set_path(&mut settings, path, value) {
-                    applied += 1;
-                }
-            }
-            match put_settings(&base, &token, &settings).await {
-                Ok(_) => {
-                    log_event("ai", &format!("oracle accepted {applied} changes"));
-                    set_oracle_open.set(false);
-                    // Mirror accepted values into the local signals that
-                    // drive the UI (settings only load once per session).
-                    for (key, draft, kind) in &accepted {
-                        match (key.strip_prefix("settings."), kind) {
-                            (Some("rangeDays"), ProposalInput::Days) => {
-                                if let Ok(d) = draft.trim().parse::<i64>() {
-                                    set_days.set(d);
-                                }
-                            }
-                            (Some("series.heartRate"), ProposalInput::Bool) => set_series.update(|s| s.heart_rate = draft.trim() == "true"),
-                            (Some("series.steps"), ProposalInput::Bool) => set_series.update(|s| s.steps = draft.trim() == "true"),
-                            (Some("series.calories"), ProposalInput::Bool) => set_series.update(|s| s.calories = draft.trim() == "true"),
-                            (Some("targets.steps"), ProposalInput::Number) => {
-                                if let Ok(v) = draft.trim().parse::<i64>() {
-                                    set_target_steps.set(v);
-                                }
-                            }
-                            (Some("targets.kcal"), ProposalInput::Number) => {
-                                if let Ok(v) = draft.trim().parse::<i64>() {
-                                    set_target_kcal.set(v);
-                                }
-                            }
-                            (Some("targets.sleepH"), ProposalInput::Number) => {
-                                if let Ok(v) = draft.trim().parse::<f64>() {
-                                    set_target_sleep.set(v);
-                                }
-                            }
-                            (Some("aiProvider.model"), ProposalInput::Text) => set_ai_model.set(draft.clone()),
-                            _ => {}
+            let mut put_needed = false;
+            for row in &accepted {
+                match row.action.as_deref() {
+                    // Action proposals: POST data instead of a settings PUT.
+                    Some("measurement") => {
+                        let metric = row.metric.clone().unwrap_or_else(|| "weight_kg".to_string());
+                        let value = row.draft.trim().parse::<f64>().unwrap_or(row.value.unwrap_or(0.0));
+                        match post_measurement(&base, &token, &metric, value, None).await {
+                            Ok(_) => applied += 1,
+                            Err(e) => set_error.set(Some(e)),
                         }
                     }
-                    refresh();
+                    Some("meal") => {
+                        let amount = row.draft.trim().parse::<f64>().unwrap_or(row.value.unwrap_or(0.0));
+                        let body = json!({
+                            "kind": "food",
+                            "amount": amount,
+                            "consumedAt": iso_from_ms(js_sys::Date::now()),
+                            "note": row.reason,
+                        });
+                        match add_nutrition(&base, &token, &body).await {
+                            Ok(_) => applied += 1,
+                            Err(e) => set_error.set(Some(e)),
+                        }
+                    }
+                    _ => {
+                        let path = row.key.strip_prefix("settings.").unwrap_or(&row.key);
+                        let value: Value = match row.input {
+                            ProposalInput::Bool => json!(row.draft.trim() == "true"),
+                            ProposalInput::Days => row.draft.trim().parse::<i64>().map(Value::from).unwrap_or(Value::Null),
+                            ProposalInput::Number => row.draft.trim().parse::<f64>().map(Value::from).unwrap_or(Value::Null),
+                            ProposalInput::Text => json!(row.draft),
+                        };
+                        if set_path(&mut settings, path, value) {
+                            applied += 1;
+                            put_needed = true;
+                        }
+                    }
                 }
-                Err(e) => set_error.set(Some(e)),
             }
+            if put_needed {
+                match put_settings(&base, &token, &settings).await {
+                    Ok(_) => {}
+                    Err(e) => set_error.set(Some(e)),
+                }
+            }
+            log_event("ai", &format!("oracle accepted {applied} changes"));
+            set_oracle_open.set(false);
+            // Mirror accepted values into the local signals that drive the
+            // UI (settings only load once per session). Action proposals have
+            // no settings key to mirror.
+            for row in &accepted {
+                if row.action.is_some() {
+                    continue;
+                }
+                let draft = &row.draft;
+                match (row.key.strip_prefix("settings."), row.input) {
+                    (Some("rangeDays"), ProposalInput::Days) => {
+                        if let Ok(d) = draft.trim().parse::<i64>() {
+                            set_days.set(d);
+                        }
+                    }
+                    (Some("series.heartRate"), ProposalInput::Bool) => set_series.update(|s| s.heart_rate = draft.trim() == "true"),
+                    (Some("series.steps"), ProposalInput::Bool) => set_series.update(|s| s.steps = draft.trim() == "true"),
+                    (Some("series.calories"), ProposalInput::Bool) => set_series.update(|s| s.calories = draft.trim() == "true"),
+                    (Some("targets.steps"), ProposalInput::Number) => {
+                        if let Ok(v) = draft.trim().parse::<i64>() {
+                            set_target_steps.set(v);
+                        }
+                    }
+                    (Some("targets.kcal"), ProposalInput::Number) => {
+                        if let Ok(v) = draft.trim().parse::<i64>() {
+                            set_target_kcal.set(v);
+                        }
+                    }
+                    (Some("targets.sleepH"), ProposalInput::Number) => {
+                        if let Ok(v) = draft.trim().parse::<f64>() {
+                            set_target_sleep.set(v);
+                        }
+                    }
+                    (Some("targets.intensityHoursPerWeek"), ProposalInput::Number) => {
+                        if let Ok(v) = draft.trim().parse::<f64>() {
+                            set_target_intensity.set(v);
+                        }
+                    }
+                    (Some("targets.weightKg"), ProposalInput::Number) => {
+                        if let Ok(v) = draft.trim().parse::<f64>() {
+                            set_target_weight.set(v);
+                        }
+                    }
+                    (Some("targets.bodyFatPct"), ProposalInput::Number) => {
+                        if let Ok(v) = draft.trim().parse::<f64>() {
+                            set_target_body_fat.set(v);
+                        }
+                    }
+                    (Some("aiProvider.model"), ProposalInput::Text) => set_ai_model.set(draft.clone()),
+                    _ => {}
+                }
+            }
+            refresh();
+            refresh_actions();
+            meas_refresh.set(meas_refresh.get() + 1);
+            nut_refresh.set(nut_refresh.get() + 1);
         });
     };
 
     let oracle_dismiss = move |_| set_oracle_proposals.set(Vec::new());
+
+    // Contextual PYTHIA: open the oracle with a section-scoped starter prompt
+    // and refresh the digest so the model sees the relevant current values.
+    const ORACLE_FLOURISH: &str = "Use the app state. Give concrete values. Never ask clarifying questions — if data is missing, use a sensible default and say so. Metric units: kg, kcal, hours, %.";
+    let oracle_ask = move |prompt: String| {
+        set_oracle_input.set(prompt);
+        set_oracle_digest.set(oracle_digest_lines());
+        set_oracle_error.set(None);
+        set_oracle_open.set(true);
+    };
+    let oracle_ask_nutrition = move |_| oracle_ask(format!("Add a meal with estimated kcal + macros — e.g. describe what I ate. {ORACLE_FLOURISH}"));
+    let oracle_ask_goals = move |_| oracle_ask(format!("Set my goals: weekly intensity (hours), body weight (kg), and body fat (%). {ORACLE_FLOURISH}"));
+    let oracle_ask_measure = move |_| oracle_ask(format!("Log my weight and body fat via AI. {ORACLE_FLOURISH}"));
+    let oracle_ask_weight = move |_| {
+        let v = meas_weight.get().trim().to_string();
+        let prompt = if v.is_empty() {
+            format!("Log my weight in kg — the value is in the input. {ORACLE_FLOURISH}")
+        } else {
+            format!("Log my weight as {v} kg. {ORACLE_FLOURISH}")
+        };
+        oracle_ask(prompt);
+    };
+    let oracle_ask_body_fat = move |_| {
+        let v = meas_body_fat.get().trim().to_string();
+        let prompt = if v.is_empty() {
+            format!("Log my body fat in % — the value is in the input. {ORACLE_FLOURISH}")
+        } else {
+            format!("Log my body fat as {v} %. {ORACLE_FLOURISH}")
+        };
+        oracle_ask(prompt);
+    };
+    let oracle_ask_ai_config = move |_| oracle_ask(format!("Help me configure the AI provider (base URL, model, API key) so PYTHIA can answer. {ORACLE_FLOURISH}"));
 
     // -- Nomoi: AI provider test + save ----------------------------------------
 
@@ -1776,7 +2027,7 @@ pub fn App() -> impl IntoView {
                                 </div>
                             </div>
                             <div class="kpi-chip">
-                                <span class="kpi-label">"BODY BATTERY"</span>
+                                <span class="kpi-label">"DYNAMIS"</span>
                                 <div class="kpi-value">
                                     {move || body_energy.get().map(|b| format!("{:.0}", b.score)).unwrap_or_else(|| "—".to_string())}
                                     <span class="unit">"/300"</span>
@@ -2032,25 +2283,121 @@ pub fn App() -> impl IntoView {
                     Tab::Leonidas => view! {
                         <TabHero tab=Tab::Leonidas />
                         <section class="panel">
-                            <div class="panel-head"><h2>"TRAINING TARGETS"</h2><span class="muted">"be like Leonidas"</span></div>
-                            <div class="target-row">
-                                <span class="row-name">"Steps / day"</span>
-                                <input prop:value=move || target_steps.get().to_string() on:input=move |ev| set_target_steps.set(event_target_value(&ev).parse().unwrap_or(0)) />
-                                <div class="bar">
-                                    <div class="bar-fill" style=move || format!("width: {}%", (points.get().iter().filter_map(|p| p.steps).sum::<i64>() as f64 / target_steps.get().max(1) as f64 * 100.0).min(100.0))></div>
+                            <div class="panel-head"><h2>"LEONIDAS — TARGETS"</h2><span class="muted">"be like Leonidas"</span></div>
+
+                            <div class="goal-section">
+                                <h3 class="section-h3">"TRAINING TARGETS"</h3>
+                                <div class="target-row">
+                                    <span class="row-name">"Steps / day"</span>
+                                    <input prop:value=move || target_steps.get().to_string() on:input=move |ev| set_target_steps.set(event_target_value(&ev).parse().unwrap_or(0)) />
+                                    <div class="bar">
+                                        <div class="bar-fill" style=move || format!("width: {}%", (points.get().iter().filter_map(|p| p.steps).sum::<i64>() as f64 / target_steps.get().max(1) as f64 * 100.0).min(100.0))></div>
+                                    </div>
                                 </div>
+                                <div class="target-row">
+                                    <span class="row-name">"Active kcal / day"</span>
+                                    <input prop:value=move || target_kcal.get().to_string() on:input=move |ev| set_target_kcal.set(event_target_value(&ev).parse().unwrap_or(0)) />
+                                    <div class="bar"><div class="bar-fill" style=move || format!("width: {}%", (points.get().iter().filter_map(|p| p.active_calories).sum::<f64>() / target_kcal.get().max(1) as f64 * 100.0).min(100.0))></div></div>
+                                </div>
+                                <div class="target-row">
+                                    <span class="row-name">"Sleep / night (h)"</span>
+                                    <input prop:value=move || target_sleep.get().to_string() on:input=move |ev| set_target_sleep.set(event_target_value(&ev).parse().unwrap_or(0.0)) />
+                                    <div class="bar"><div class="bar-fill" style=move || format!("width: {}%", (sleep.get().iter().map(|s| s.sleep_seconds).sum::<f64>() / 3600.0 / target_sleep.get().max(0.1) * 100.0).min(100.0))></div></div>
+                                </div>
+                                <div class="target-row">
+                                    <span class="row-name">"Intensity / week (h)"</span>
+                                    <input prop:value=move || target_intensity.get().to_string() on:input=move |ev| set_target_intensity.set(event_target_value(&ev).parse().unwrap_or(0.0)) />
+                                    <div class="target-progress">
+                                        <div class="bar"><div class="bar-fill" style=move || format!("width: {}%", goal_pct(week_intensity_h(), target_intensity.get()))></div></div>
+                                        <span class="target-hint">{move || format!("{:.1} h from closed agoges this week", week_intensity_h())}</span>
+                                    </div>
+                                </div>
+                                <button class="btn" on:click=move |_| persist_settings()>"SAVE TARGETS"</button>
                             </div>
-                            <div class="target-row">
-                                <span class="row-name">"Active kcal / day"</span>
-                                <input prop:value=move || target_kcal.get().to_string() on:input=move |ev| set_target_kcal.set(event_target_value(&ev).parse().unwrap_or(0)) />
-                                <div class="bar"><div class="bar-fill" style=move || format!("width: {}%", (points.get().iter().filter_map(|p| p.active_calories).sum::<f64>() / target_kcal.get().max(1) as f64 * 100.0).min(100.0))></div></div>
+
+                            <hr class="hairline" />
+
+                            <div class="goal-section">
+                                <h3 class="section-h3">"BODY GOALS"</h3>
+                                <div class="target-row">
+                                    <span class="row-name">"Weight (kg)"</span>
+                                    <input prop:value=move || target_weight.get().to_string() on:input=move |ev| set_target_weight.set(event_target_value(&ev).parse().unwrap_or(0.0)) />
+                                    {move || {
+                                        let latest = measurements.get().into_iter().find(|m| m.metric == "weight_kg");
+                                        match latest {
+                                            Some(m) => view! {
+                                                <div class="target-progress">
+                                                    <div class="bar"><div class="bar-fill" style=format!("width: {}%", goal_pct(m.value, target_weight.get()))></div></div>
+                                                    <span class="target-hint">{format!("latest {:.1} kg · {:.0}% of goal", m.value, goal_pct(m.value, target_weight.get()))}</span>
+                                                </div>
+                                            }.into_view(),
+                                            None => view! {
+                                                <div class="target-progress"><span class="target-hint muted">"no weight logged yet — measure below"</span></div>
+                                            }.into_view(),
+                                        }
+                                    }}
+                                </div>
+                                <div class="target-row">
+                                    <span class="row-name">"Body fat (%)"</span>
+                                    <input prop:value=move || target_body_fat.get().to_string() on:input=move |ev| set_target_body_fat.set(event_target_value(&ev).parse().unwrap_or(0.0)) />
+                                    {move || {
+                                        let latest = measurements.get().into_iter().find(|m| m.metric == "body_fat_pct");
+                                        match latest {
+                                            Some(m) => view! {
+                                                <div class="target-progress">
+                                                    <div class="bar"><div class="bar-fill" style=format!("width: {}%", goal_pct(m.value, target_body_fat.get()))></div></div>
+                                                    <span class="target-hint">{format!("latest {:.1} % · {:.0}% of goal", m.value, goal_pct(m.value, target_body_fat.get()))}</span>
+                                                </div>
+                                            }.into_view(),
+                                            None => view! {
+                                                <div class="target-progress"><span class="target-hint muted">"no body-fat logged yet — measure below"</span></div>
+                                            }.into_view(),
+                                        }
+                                    }}
+                                </div>
+                                <button class="btn small pythia-btn" on:click=oracle_ask_goals>"PYTHIA — SET GOALS"</button>
                             </div>
-                            <div class="target-row">
-                                <span class="row-name">"Sleep / night (h)"</span>
-                                <input prop:value=move || target_sleep.get().to_string() on:input=move |ev| set_target_sleep.set(event_target_value(&ev).parse().unwrap_or(0.0)) />
-                                <div class="bar"><div class="bar-fill" style=move || format!("width: {}%", (sleep.get().iter().map(|s| s.sleep_seconds).sum::<f64>() / 3600.0 / target_sleep.get().max(0.1) * 100.0).min(100.0))></div></div>
+
+                            <hr class="hairline" />
+
+                            <div class="goal-section">
+                                <div class="section-head">
+                                    <h3 class="section-h3">"MEASUREMENTS"</h3>
+                                    <button class="btn small pythia-btn" on:click=oracle_ask_measure>"PYTHIA — LOG VIA AI"</button>
+                                </div>
+                                <div class="settings-grid">
+                                    <label class="ctl">"WEIGHT (KG)"
+                                        <input prop:value=meas_weight on:input=move |ev| set_meas_weight.set(event_target_value(&ev)) placeholder="82.5" />
+                                    </label>
+                                    <button class="btn" on:click=move |_| log_measurement("weight_kg")>"LOG WEIGHT"</button>
+                                    <button class="btn small pythia-btn" on:click=oracle_ask_weight>"PYTHIA"</button>
+                                    <label class="ctl">"BODY FAT (%)"
+                                        <input prop:value=meas_body_fat on:input=move |ev| set_meas_body_fat.set(event_target_value(&ev)) placeholder="15.0" />
+                                    </label>
+                                    <button class="btn" on:click=move |_| log_measurement("body_fat_pct")>"LOG BODY FAT"</button>
+                                    <button class="btn small pythia-btn" on:click=oracle_ask_body_fat>"PYTHIA"</button>
+                                </div>
+                                <p class="muted" style="margin:10px 0 6px">"latest first · every log also lands in the SKOPOS action log"</p>
+                                <ul class="list measure-list">
+                                    <For each=move || measurements.get() key=|m| format!("{}-{}", m.metric, m.ts) let:m>
+                                        {move || {
+                                            let name = if m.metric == "weight_kg" { "WEIGHT".to_string() } else { "BODY FAT".to_string() };
+                                            let val = if m.metric == "weight_kg" { format!("{:.1} kg", m.value) } else { format!("{:.1} %", m.value) };
+                                            let time = m.ts_ms().map(fmt_time).unwrap_or_default();
+                                            view! {
+                                                <li class="row">
+                                                    <span class="row-name">{name}</span>
+                                                    <span class="metric-val">{val}</span>
+                                                    <span class="row-time">{time}</span>
+                                                </li>
+                                            }
+                                        }}
+                                    </For>
+                                </ul>
+                                <Show when=move || measurements.get().is_empty() fallback=|| ()>
+                                    <p class="muted">"No measurements yet — log your first weight or body-fat above."</p>
+                                </Show>
                             </div>
-                            <button class="btn" style="margin-top:12px" on:click=move |_| persist_settings()>"SAVE TARGETS"</button>
                         </section>
                     }.into_view(),
 
@@ -2135,7 +2482,10 @@ pub fn App() -> impl IntoView {
                             </div>
                         </section>
                         <section class="panel">
-                            <div class="panel-head"><h2>"LOG FOOD / WATER"</h2></div>
+                            <div class="panel-head">
+                                <h2>"LOG FOOD / WATER"</h2>
+                                <button class="btn small pythia-btn" on:click=oracle_ask_nutrition>"PYTHIA — LOG A MEAL"</button>
+                            </div>
                             <div class="settings-grid">
                                 <label class="ctl">"KIND"
                                     <select on:change=move |ev| set_manual_kind.set(event_target_value(&ev))>
@@ -2350,7 +2700,7 @@ pub fn App() -> impl IntoView {
                                                         <div class="trend-caption">"LAST 14 DAYS · SCORE / 300"</div>
                                                         <svg viewBox="0 0 336 64" class="trend-svg" preserveAspectRatio="none">{bars}</svg>
                                                     </div>
-                                                    <p class="muted">"READINESS = 300 + SLEEP RECHARGE − STRESS DRAIN − ACTIVITY DRAIN, NORMALIZED AGAINST YOUR OWN 90-DAY BASELINES. SLEEP LONG, TRAIN HARD, AND THE RING STAYS NEAR THE 300."</p>
+                                                    <p class="muted">"READINESS = 300 + SLEEP RECHARGE − PONOS DRAIN − ACTIVITY DRAIN, NORMALIZED AGAINST YOUR OWN 90-DAY BASELINES. SLEEP LONG, TRAIN HARD, AND THE RING STAYS NEAR THE 300."</p>
                                                 </div>
                                             </div>
                                         }
@@ -2375,11 +2725,11 @@ pub fn App() -> impl IntoView {
                                                     <div class="kpi-value">{baseline_triple(b.resting_hr.as_ref())}</div>
                                                 </div>
                                                 <div class="kpi-chip">
-                                                    <span class="kpi-label">"STRESS · PTS"</span>
+                                                    <span class="kpi-label">"PONOS · PTS"</span>
                                                     <div class="kpi-value">{baseline_triple(b.stress.as_ref())}</div>
                                                 </div>
                                                 <div class="kpi-chip">
-                                                    <span class="kpi-label">"BODY BATTERY · PTS"</span>
+                                                    <span class="kpi-label">"DYNAMIS · PTS"</span>
                                                     <div class="kpi-value">{baseline_triple(b.battery.as_ref())}</div>
                                                 </div>
                                             </div>
@@ -2404,39 +2754,45 @@ pub fn App() -> impl IntoView {
                             </div>
                         </section>
                         <section class="panel">
-                            <div class="panel-head"><h2>"PYTHIA — AI PROVIDER"</h2></div>
-                            <div class="settings-grid">
-                                <label class="ctl">"PROVIDER"
-                                    <select on:change=move |ev| set_ai_provider.set(event_target_value(&ev))>
-                                        <option value="llamacpp">"LLAMA.CPP (LOCAL)"</option>
-                                        <option value="ollama">"OLLAMA (LOCAL)"</option>
-                                        <option value="openai">"OPENAI (REMOTE)"</option>
-                                    </select>
-                                </label>
-                                <label class="ctl">"BASE URL (CHAT COMPLETIONS)"
-                                    <input prop:value=ai_base on:input=move |ev| set_ai_base.set(event_target_value(&ev)) placeholder=move || ai_placeholder() spellcheck="false" />
-                                </label>
-                                <label class="ctl">"MODEL"
-                                    <input prop:value=ai_model on:input=move |ev| set_ai_model.set(event_target_value(&ev)) placeholder="llama3" />
-                                </label>
-                                <label class="ctl">"API KEY"
-                                    <input type="password" prop:value=ai_key on:input=move |ev| set_ai_key.set(event_target_value(&ev)) placeholder="(blank for local)" />
-                                </label>
+                            <div class="panel-head">
+                                <h2>"PYTHIA — AI PROVIDER"</h2>
+                                <button class="btn small pythia-btn" on:click=oracle_ask_ai_config>"PYTHIA — CONFIG HELP"</button>
                             </div>
-                            <p class="muted" style="margin-top:12px">"Feeds the PYTHIA oracle (the red button, every tab) — local llama.cpp / Ollama or remote OpenAI. Nothing leaves this machine unless you point it there."</p>
-                            <div class="ai-provider-actions">
-                                <button class="btn" disabled=move || ai_testing.get() on:click=test_ai_provider>{move || if ai_testing.get() { "TESTING…".to_string() } else { "TEST".to_string() }}</button>
-                                <button class="btn" on:click=save_ai_provider>"SAVE"</button>
-                            </div>
-                            {move || match ai_test_result.get() {
-                                None => view! {}.into_view(),
-                                Some((ok, msg)) => {
-                                    let cls = if ok { "ai-test-result ok" } else { "ai-test-result fail" };
-                                    view! {
-                                        <p class=cls>{msg}</p>
-                                    }.into_view()
-                                }
-                            }}
+                            <details class="advanced">
+                                <summary>"PROVIDER CONFIGURATION (ADVANCED)"</summary>
+                                <div class="settings-grid">
+                                    <label class="ctl">"PROVIDER"
+                                        <select on:change=move |ev| set_ai_provider.set(event_target_value(&ev))>
+                                            <option value="llamacpp">"LLAMA.CPP (LOCAL)"</option>
+                                            <option value="ollama">"OLLAMA (LOCAL)"</option>
+                                            <option value="openai">"OPENAI (REMOTE)"</option>
+                                        </select>
+                                    </label>
+                                    <label class="ctl">"BASE URL (CHAT COMPLETIONS)"
+                                        <input prop:value=ai_base on:input=move |ev| set_ai_base.set(event_target_value(&ev)) placeholder=move || ai_placeholder() spellcheck="false" />
+                                    </label>
+                                    <label class="ctl">"MODEL"
+                                        <input prop:value=ai_model on:input=move |ev| set_ai_model.set(event_target_value(&ev)) placeholder="llama3" />
+                                    </label>
+                                    <label class="ctl">"API KEY"
+                                        <input type="password" prop:value=ai_key on:input=move |ev| set_ai_key.set(event_target_value(&ev)) placeholder="(blank for local)" />
+                                    </label>
+                                </div>
+                                <p class="muted" style="margin-top:12px">"Feeds the PYTHIA oracle (the red button, every tab) — local llama.cpp / Ollama or remote OpenAI. Nothing leaves this machine unless you point it there."</p>
+                                <div class="ai-provider-actions">
+                                    <button class="btn" disabled=move || ai_testing.get() on:click=test_ai_provider>{move || if ai_testing.get() { "TESTING…".to_string() } else { "TEST".to_string() }}</button>
+                                    <button class="btn" on:click=save_ai_provider>"SAVE"</button>
+                                </div>
+                                {move || match ai_test_result.get() {
+                                    None => view! {}.into_view(),
+                                    Some((ok, msg)) => {
+                                        let cls = if ok { "ai-test-result ok" } else { "ai-test-result fail" };
+                                        view! {
+                                            <p class=cls>{msg}</p>
+                                        }.into_view()
+                                    }
+                                }}
+                            </details>
                         </section>
                         <section class="panel import-panel">
                             <div class="panel-head"><h2>"IMPORT DATA"</h2><span class="muted">{move || import_name.get()}</span></div>
@@ -2507,6 +2863,37 @@ pub fn App() -> impl IntoView {
                     }.into_view(),
                     Tab::Skopos => view! {
                         <TabHero tab=Tab::Skopos />
+                        <section class="panel">
+                            <div class="panel-head">
+                                <h2>"ACTION LOG"</h2>
+                                <span class="muted">{move || format!("{} actions", actions.get().len())}</span>
+                            </div>
+                            <ul class="list action-list">
+                                <For each=move || actions.get() key=|a| format!("{}-{}", a.id, a.reverted_at.is_some()) let:a>
+                                    {move || {
+                                        let id = a.id.clone();
+                                        let reverted = a.reverted_at.is_some();
+                                        let time = ms_from_iso(&a.created_at).map(fmt_time).unwrap_or_else(|| a.created_at.chars().take(16).collect());
+                                        let target = if a.target.is_empty() { a.kind.clone() } else { a.target.clone() };
+                                        view! {
+                                            <li class="row action-row">
+                                                <span class="action-kind">{a.kind.to_uppercase()}</span>
+                                                <span class="action-target">{target}</span>
+                                                <span class="row-time">{time}</span>
+                                                {if reverted {
+                                                    view! { <span class="action-reverted">"REVERTED"</span> }.into_view()
+                                                } else {
+                                                    view! { <button class="btn small" on:click=move |_| revert_action_fn(id.clone())>"REVERT"</button> }.into_view()
+                                                }}
+                                            </li>
+                                        }
+                                    }}
+                                </For>
+                            </ul>
+                            <Show when=move || actions.get().is_empty() fallback=|| ()>
+                                <p class="muted">"No persisted actions yet — settings saves, nutrition, and measurements are recorded here and can be reverted."</p>
+                            </Show>
+                        </section>
                         <section class="panel">
                             <div class="panel-head">
                                 <h2>"SKOPOS — ACTIVITY LOG"</h2>

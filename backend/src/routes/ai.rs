@@ -13,6 +13,23 @@
 //! - `POST /api/v1/ai/test` — reachability check for the provider config
 //!   form, before the config is saved.
 //!
+//! Proposal shapes:
+//! - Settings keys (`settings.*`) keep the shape
+//!   `{key, label, current, proposed, reason}` — `current` is read from the
+//!   user's settings JSONB.
+//! - Action keys log new data instead of changing settings and carry
+//!   `{key, label, current, proposed, reason, action, metric, value}`:
+//!   - `action.measurement.weight_kg` → `action: "measurement"`,
+//!     `metric: "weight_kg"`, `value` the clamped kg number, `current` the
+//!     latest logged weight or null.
+//!   - `action.measurement.body_fat_pct` → same shape with
+//!     `metric: "body_fat_pct"` (percent).
+//!   - `action.meal` → `action: "meal"`, `metric: "meal"`, `value` the
+//!     estimated kcal, `current` always null (meals are events, not values).
+//!   The UI maps `action` + `metric` + `value` to `POST /api/v1/measurements`
+//!   (weight_kg / body_fat_pct) or `POST /api/v1/nutrition` (meal → kind
+//!   `food`, amount = kcal, note from `reason`).
+//!
 //! Provider config lives in the per-user settings JSONB under `aiProvider`:
 //!   { "provider": "llamacpp" | "ollama" | "openai",
 //!     "baseUrl": "http://localhost:8080/v1", "model": "llama3", "apiKey": "" }
@@ -144,7 +161,10 @@ pub async fn chat(
 
     let (reply, block) = extract_pythia_block(&content);
     let proposals = match block.as_deref() {
-        Some(inner) => validate_proposals(inner, &load_settings(&pool, user.0).await?),
+        Some(inner) => {
+            let settings = load_settings(&pool, user.0).await?;
+            validate_proposals(inner, &settings, &pool, user.0).await?
+        }
         None => Vec::new(),
     };
 
@@ -281,9 +301,10 @@ async fn load_provider(pool: &PgPool, user_id: uuid::Uuid) -> ApiResult<AiProvid
         })
 }
 
-/// Settings keys PYTHIA is allowed to propose. The system prompt advertises
-/// exactly this list; `build_proposal` enforces it.
-const PYTHIA_ALLOWED_KEYS: [&str; 14] = [
+/// Settings keys PYTHIA is allowed to propose, plus the action keys that log
+/// data. The system prompt advertises exactly this list; `build_proposal`
+/// enforces it.
+const PYTHIA_ALLOWED_KEYS: [&str; 20] = [
     "settings.rangeDays",
     "settings.series.heartRate",
     "settings.series.steps",
@@ -291,6 +312,9 @@ const PYTHIA_ALLOWED_KEYS: [&str; 14] = [
     "settings.targets.steps",
     "settings.targets.kcal",
     "settings.targets.sleepH",
+    "settings.targets.intensityHoursPerWeek",
+    "settings.targets.weightKg",
+    "settings.targets.bodyFatPct",
     "settings.nutrition.waterGoalMl",
     "settings.nutrition.kcalGoal",
     "settings.nutrition.proteinGoal",
@@ -298,6 +322,9 @@ const PYTHIA_ALLOWED_KEYS: [&str; 14] = [
     "settings.nutrition.fatGoal",
     "settings.aiProvider.provider",
     "settings.aiProvider.model",
+    "action.measurement.weight_kg",
+    "action.measurement.body_fat_pct",
+    "action.meal",
 ];
 
 fn system_prompt(context: &Value) -> String {
@@ -316,12 +343,25 @@ fn system_prompt(context: &Value) -> String {
          Rules:\n\
          - Be concise, direct, and evidence-based. Use only the app state above;\n\
          - never invent numbers that are not given.\n\
-         - You may recommend concrete changes to exactly these settings keys:\n\
+         - ALWAYS propose concrete values when recommending a change; NEVER ask\n\
+         - clarifying questions — pick a sensible default for anything unspecified.\n\
+         - Assume metric units throughout: kilograms (kg), kilocalories (kcal),\n\
+         - hours (h), millilitres (ml). For meals, estimate calories from the\n\
+         - user's description even when portion amounts are not stated.\n\
+         - You may recommend concrete changes to exactly these keys:\n\
          - {keys}\n\
-         - IF (and only if) you recommend concrete settings changes, end your reply with\n\
+         - Settings keys (prefix \"settings.\") update the user's stored preferences.\n\
+         - Action keys log new data instead of changing settings:\n\
+         -   [PYTHIA]{{\"action.measurement.weight_kg\": 82.5}}[/PYTHIA]\n\
+         -     logs a weight measurement (kg);\n\
+         -   [PYTHIA]{{\"action.measurement.body_fat_pct\": 18}}[/PYTHIA]\n\
+         -     logs a body-fat measurement (percent);\n\
+         -   [PYTHIA]{{\"action.meal\": 650}}[/PYTHIA]\n\
+         -     logs a meal estimated at 650 kcal.\n\
+         - IF (and only if) you recommend concrete changes, end your reply with\n\
          - EXACTLY one line of the form\n\
-         -   [PYTHIA]{{\"settings.rangeDays\": 30}}[/PYTHIA]\n\
-         - containing a single flat JSON object of dotted settings keys mapped to\n\
+         -   [PYTHIA]{{\"settings.rangeDays\": 30, \"action.meal\": 650}}[/PYTHIA]\n\
+         - containing a single flat JSON object of dotted keys mapped to\n\
          - their new values (numbers, booleans, or short strings) and nothing else.\n\
          - No other brackets or text on that line.\n\
          - Never invent keys outside the list; the backend drops unknown keys.\n",
@@ -350,23 +390,88 @@ fn extract_pythia_block(content: &str) -> (String, Option<String>) {
 
 /// Validates the flat JSON object inside a `[PYTHIA]...[/PYTHIA]` line.
 /// Unknown keys are dropped; out-of-range values are clamped and noted in
-/// `reason`. `current` is read from the user's own settings JSONB.
-fn validate_proposals(block: &str, settings: &Value) -> Vec<Value> {
+/// `reason`. `current` is read from the user's own settings JSONB (settings
+/// keys) or the latest logged measurement (action keys).
+async fn validate_proposals(
+    block: &str,
+    settings: &Value,
+    pool: &PgPool,
+    user_id: uuid::Uuid,
+) -> Result<Vec<Value>, sqlx::Error> {
     let Some(obj) = serde_json::from_str::<Value>(block).ok().filter(|v| v.is_object()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut proposals = Vec::new();
     for (key, raw) in obj.as_object().unwrap() {
-        if let Some(p) = build_proposal(key, raw, settings) {
+        if let Some(p) = build_proposal(key, raw, settings, pool, user_id).await? {
             proposals.push(p);
         }
     }
-    proposals
+    Ok(proposals)
 }
 
-/// Whitelists one proposed settings key. Returns `None` for unknown keys or
-/// values that cannot be coerced to the expected type (dropped silently).
-fn build_proposal(key: &str, raw: &Value, settings: &Value) -> Option<Value> {
+/// Whitelists one proposed key (settings or action). Returns `None` for
+/// unknown keys or values that cannot be coerced to the expected type
+/// (dropped silently).
+async fn build_proposal(
+    key: &str,
+    raw: &Value,
+    settings: &Value,
+    pool: &PgPool,
+    user_id: uuid::Uuid,
+) -> Result<Option<Value>, sqlx::Error> {
+    if let Some((label, action, metric, proposed, note)) = action_proposal_fields(key, raw) {
+        let current = if metric == "meal" {
+            // Meals are events, not values — nothing to show as "current".
+            Value::Null
+        } else {
+            match crate::routes::measurements::latest(pool, user_id, metric).await? {
+                Some(v) => json!(v),
+                None => Value::Null,
+            }
+        };
+        return Ok(Some(json!({
+            "key": key,
+            "label": label,
+            "current": current,
+            "proposed": proposed,
+            "reason": note.unwrap_or_else(|| "suggested by Pythia".to_string()),
+            "action": action,
+            "metric": metric,
+            "value": proposed,
+        })));
+    }
+    Ok(build_settings_proposal(key, raw, settings))
+}
+
+/// Static fields of an action proposal — label, action kind, metric and the
+/// clamped proposed value — without touching the DB. The `current` field is
+/// resolved separately from the latest logged measurement.
+fn action_proposal_fields(
+    key: &str,
+    raw: &Value,
+) -> Option<(&'static str, &'static str, &'static str, Value, Option<String>)> {
+    match key {
+        "action.measurement.weight_kg" => {
+            let (p, note) = clamp_float(raw, 20.0, 400.0)?;
+            Some(("Weight (kg)", "measurement", "weight_kg", p, note))
+        }
+        "action.measurement.body_fat_pct" => {
+            let (p, note) = clamp_float(raw, 3.0, 60.0)?;
+            Some(("Body fat (%)", "measurement", "body_fat_pct", p, note))
+        }
+        "action.meal" => {
+            let (p, note) = clamp_float(raw, 0.0, 20000.0)?;
+            Some(("Meal (kcal)", "meal", "meal", p, note))
+        }
+        _ => None,
+    }
+}
+
+/// Whitelists one proposed settings key (no DB access). Returns `None` for
+/// unknown keys or values that cannot be coerced to the expected type
+/// (dropped silently).
+fn build_settings_proposal(key: &str, raw: &Value, settings: &Value) -> Option<Value> {
     let (label, proposed, note) = match key {
         "settings.rangeDays" => {
             let v = as_num(raw)?;
@@ -401,6 +506,18 @@ fn build_proposal(key: &str, raw: &Value, settings: &Value) -> Option<Value> {
         "settings.targets.sleepH" => {
             let (p, note) = clamp_float(raw, 0.0, 24.0)?;
             ("Sleep target (hours)", p, note)
+        }
+        "settings.targets.intensityHoursPerWeek" => {
+            let (p, note) = clamp_float(raw, 0.0, 168.0)?;
+            ("Weekly intensity target (h)", p, note)
+        }
+        "settings.targets.weightKg" => {
+            let (p, note) = clamp_float(raw, 20.0, 400.0)?;
+            ("Weight target (kg)", p, note)
+        }
+        "settings.targets.bodyFatPct" => {
+            let (p, note) = clamp_float(raw, 3.0, 60.0)?;
+            ("Body fat target (%)", p, note)
         }
         "settings.nutrition.waterGoalMl" => {
             let (p, note) = clamp_int(raw, 100, 10_000)?;
@@ -576,6 +693,9 @@ mod tests {
             "settings.targets.steps" => json!(8000),
             "settings.targets.kcal" => json!(2500),
             "settings.targets.sleepH" => json!(8.0),
+            "settings.targets.intensityHoursPerWeek" => json!(10.0),
+            "settings.targets.weightKg" => json!(80.0),
+            "settings.targets.bodyFatPct" => json!(20.0),
             "settings.nutrition.waterGoalMl" => json!(2500),
             "settings.nutrition.kcalGoal" => json!(2200),
             "settings.nutrition.proteinGoal" => json!(140),
@@ -583,8 +703,25 @@ mod tests {
             "settings.nutrition.fatGoal" => json!(70),
             "settings.aiProvider.provider" => json!("ollama"),
             "settings.aiProvider.model" => json!("llama3"),
+            "action.measurement.weight_kg" => json!(82.5),
+            "action.measurement.body_fat_pct" => json!(18.0),
+            "action.meal" => json!(650),
             other => panic!("no sample for {other}"),
         }
+    }
+
+    /// Sync settings-only stand-in for the async, DB-backed
+    /// `validate_proposals` — the unit tests never touch a database.
+    fn validate_settings(block: &str, settings: &Value) -> Vec<Value> {
+        let Some(obj) = serde_json::from_str::<Value>(block).ok().filter(|v| v.is_object())
+        else {
+            return Vec::new();
+        };
+        obj.as_object()
+            .expect("object in test")
+            .iter()
+            .filter_map(|(k, v)| build_settings_proposal(k, v, settings))
+            .collect()
     }
 
     #[test]
@@ -592,7 +729,10 @@ mod tests {
         let settings = json!({
             "rangeDays": 7,
             "series": { "heartRate": true, "steps": true, "calories": false },
-            "targets": { "steps": 8000, "kcal": 2500, "sleepH": 8 },
+            "targets": {
+                "steps": 8000, "kcal": 2500, "sleepH": 8,
+                "intensityHoursPerWeek": 10, "weightKg": 80, "bodyFatPct": 20
+            },
             "nutrition": {
                 "waterGoalMl": 2000,
                 "kcalGoal": 2200,
@@ -603,11 +743,24 @@ mod tests {
             "aiProvider": { "provider": "openai", "model": "gpt-4o-mini" }
         });
         for key in PYTHIA_ALLOWED_KEYS {
-            let p = build_proposal(key, &sample(key), &settings)
+            if key.starts_with("action.") {
+                let (label, action, metric, proposed, note) = action_proposal_fields(
+                    key,
+                    &sample(key),
+                )
                 .unwrap_or_else(|| panic!("whitelist key {key} was rejected"));
-            assert_eq!(p["key"], json!(key));
-            assert!(p["label"].is_string());
-            assert!(p["reason"].is_string());
+                assert!(!label.is_empty());
+                assert!(action == "measurement" || action == "meal");
+                assert!(!metric.is_empty());
+                assert!(proposed.is_number());
+                assert!(note.is_none());
+            } else {
+                let p = build_settings_proposal(key, &sample(key), &settings)
+                    .unwrap_or_else(|| panic!("whitelist key {key} was rejected"));
+                assert_eq!(p["key"], json!(key));
+                assert!(p["label"].is_string());
+                assert!(p["reason"].is_string());
+            }
         }
     }
 
@@ -623,7 +776,7 @@ mod tests {
     #[test]
     fn unknown_keys_are_dropped() {
         let settings = json!({ "rangeDays": 7 });
-        let ps = validate_proposals(
+        let ps = validate_settings(
             r#"{"settings.rangeDays": 30, "settings.bogus": 1, "nope": true, "settings.targets.heartsRate": 9}"#,
             &settings,
         );
@@ -639,7 +792,7 @@ mod tests {
             "nutrition": { "waterGoalMl": 2000 },
             "targets": { "steps": 8000, "sleepH": 8 },
         });
-        let ps = validate_proposals(
+        let ps = validate_settings(
             r#"{"settings.nutrition.waterGoalMl": 50000, "settings.targets.steps": 0, "settings.targets.sleepH": 40}"#,
             &settings,
         );
@@ -655,6 +808,59 @@ mod tests {
     }
 
     #[test]
+    fn new_target_keys_are_clamped() {
+        let settings = json!({});
+        let ps = validate_settings(
+            r#"{"settings.targets.intensityHoursPerWeek": 200, "settings.targets.weightKg": 10, "settings.targets.bodyFatPct": 70}"#,
+            &settings,
+        );
+        assert_eq!(ps.len(), 3);
+        let hours = ps.iter().find(|p| p["key"] == "settings.targets.intensityHoursPerWeek").unwrap();
+        assert_eq!(hours["proposed"], json!(168.0));
+        let weight = ps.iter().find(|p| p["key"] == "settings.targets.weightKg").unwrap();
+        assert_eq!(weight["proposed"], json!(20.0));
+        let fat = ps.iter().find(|p| p["key"] == "settings.targets.bodyFatPct").unwrap();
+        assert_eq!(fat["proposed"], json!(60.0));
+    }
+
+    #[test]
+    fn action_proposals_carry_action_metric_value() {
+        let (label, action, metric, proposed, _) =
+            action_proposal_fields("action.measurement.weight_kg", &json!(82.5)).unwrap();
+        assert_eq!(label, "Weight (kg)");
+        assert_eq!(action, "measurement");
+        assert_eq!(metric, "weight_kg");
+        assert_eq!(proposed, json!(82.5));
+
+        let (_, action, metric, proposed, _) =
+            action_proposal_fields("action.measurement.body_fat_pct", &json!(18)).unwrap();
+        assert_eq!(action, "measurement");
+        assert_eq!(metric, "body_fat_pct");
+        assert_eq!(proposed, json!(18.0));
+
+        let (_, action, metric, proposed, _) =
+            action_proposal_fields("action.meal", &json!(650)).unwrap();
+        assert_eq!(action, "meal");
+        assert_eq!(metric, "meal");
+        assert_eq!(proposed, json!(650.0));
+    }
+
+    #[test]
+    fn action_values_are_clamped() {
+        let (_, _, _, proposed, note) =
+            action_proposal_fields("action.measurement.weight_kg", &json!(500.0)).unwrap();
+        assert_eq!(proposed, json!(400.0));
+        assert!(note.unwrap().contains("clamped"));
+
+        let (_, _, _, proposed, _) =
+            action_proposal_fields("action.measurement.body_fat_pct", &json!(1.0)).unwrap();
+        assert_eq!(proposed, json!(3.0));
+
+        let (_, _, _, proposed, _) = action_proposal_fields("action.meal", &json!(-5.0)).unwrap();
+        assert_eq!(proposed, json!(0.0));
+    }
+
+    #[test]
     fn range_days_snaps_to_allowed_set() {
         let settings = json!({ "rangeDays": 30 });
         for (in_v, out_v) in [
@@ -665,7 +871,7 @@ mod tests {
             (365.0, 365),
         ] {
             let ps =
-                validate_proposals(&format!(r#"{{"settings.rangeDays": {in_v}}}"#), &settings);
+                validate_settings(&format!(r#"{{"settings.rangeDays": {in_v}}}"#), &settings);
             assert_eq!(ps.len(), 1, "for input {in_v}");
             assert_eq!(ps[0]["proposed"], json!(out_v), "for input {in_v}");
         }
@@ -675,7 +881,7 @@ mod tests {
     fn model_truncation_is_noted() {
         let settings = json!({ "aiProvider": { "provider": "openai", "model": "short" } });
         let long: String = "m".repeat(200);
-        let ps = validate_proposals(
+        let ps = validate_settings(
             &format!(r#"{{"settings.aiProvider.model": "{long}"}}"#),
             &settings,
         );
@@ -707,7 +913,7 @@ mod tests {
     fn malformed_block_yields_no_proposals_but_is_stripped() {
         let (reply, block) = extract_pythia_block("Done. [PYTHIA]{not json}[/PYTHIA] Bye.");
         assert_eq!(block.as_deref(), Some("{not json}"));
-        assert_eq!(validate_proposals(block.as_deref().unwrap(), &json!({})).len(), 0);
+        assert_eq!(validate_settings(block.as_deref().unwrap(), &json!({})).len(), 0);
         assert!(!reply.contains("[PYTHIA]"));
     }
 }

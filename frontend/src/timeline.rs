@@ -624,12 +624,12 @@ pub fn TimelineChart(
             <aside class="legend-sidebar">
                 <div class="legend-item">
                     <span class="legend-swatch" style="background:#90a4ae"></span>
-                    <span class="legend-name">"Stress"</span>
+                    <span class="legend-name">"PONOS"</span>
                     <span class="legend-unit">"0-300"</span>
                 </div>
                 <div class="legend-item">
                     <span class="legend-swatch" style="background:#e53935"></span>
-                    <span class="legend-name">"Body battery"</span>
+                    <span class="legend-name">"DYNAMIS"</span>
                     <span class="legend-unit">"0-300"</span>
                 </div>
             </aside>
@@ -715,10 +715,10 @@ fn build_battery_opts(width: i32) -> serde_json::Value {
         ],
         "series": [
             {},
-            { "label": "Stress", "stroke": "#90a4ae", "width": 1.5,
+            { "label": "PONOS", "stroke": "#90a4ae", "width": 1.5,
               "fill": "rgba(144, 164, 174, 0.14)", "spanGaps": false,
               "points": { "show": false } },
-            { "label": "Body battery", "stroke": "#e53935", "width": 2.5, "scale": "y2",
+            { "label": "DYNAMIS", "stroke": "#e53935", "width": 2.5, "scale": "y2",
               "fill": "rgba(229, 57, 53, 0.15)", "spanGaps": false,
               "points": { "show": false } }
         ]

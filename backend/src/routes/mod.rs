@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod agoge_sessions;
 pub mod agoge_types;
 pub mod ai;
@@ -5,6 +6,7 @@ pub mod events;
 pub mod health;
 pub mod import;
 pub mod ingest;
+pub mod measurements;
 pub mod metrics;
 pub mod nutrition;
 pub mod settings;
@@ -88,13 +90,18 @@ pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
             get(settings::get_settings).put(settings::put_settings),
         )
         .route("/api/v1/ingest", post(ingest::ingest))
-        .route("/api/v1/measurements", get(ingest::list_measurements))
+        .route(
+            "/api/v1/measurements",
+            get(ingest::list_measurements).post(measurements::add_measurement),
+        )
         .route("/api/v1/import", post(import::import))
         .route(
             "/api/v1/nutrition",
             get(nutrition::list_nutrition).post(nutrition::add_nutrition),
         )
         .route("/api/v1/nutrition/daily", get(nutrition::daily))
+        .route("/api/v1/actions", get(actions::list_actions))
+        .route("/api/v1/actions/{id}/revert", post(actions::revert_action))
         .route(
             "/api/v1/metrics/body-battery",
             get(metrics::body_battery),

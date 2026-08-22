@@ -16,7 +16,8 @@ use uuid::Uuid;
 use crate::{
     auth::AuthUser,
     error::{ApiError, ApiResult},
-    normalize::{insert_measurements, Measurement, METRIC_FOOD_KCAL, METRIC_WATER_ML},
+    normalize::{METRIC_FOOD_KCAL, METRIC_WATER_ML},
+    routes::actions::{log_action, KIND_NUTRITION},
 };
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +75,7 @@ pub async fn add_nutrition(
         }
     }
 
+    let mut tx = pool.begin().await?;
     let row: NutritionRow = sqlx::query_as(
         "INSERT INTO nutrition_log
              (user_id, kind, amount, protein, carbs, fat, meal_type, consumed_at, note)
@@ -89,23 +91,57 @@ pub async fn add_nutrition(
     .bind(entry.meal_type.as_deref())
     .bind(entry.consumed_at)
     .bind(&entry.note)
-    .fetch_one(&pool)
+    .fetch_one(&mut *tx)
     .await?;
 
-    // Mirror into the normalized store.
+    // Mirror into the normalized store (same dedup semantics as
+    // `insert_measurements`: unique (user_id, metric, ts)).
     let (metric, unit) = if kind == "water" {
         (METRIC_WATER_ML, "ml")
     } else {
         (METRIC_FOOD_KCAL, "kcal")
     };
-    let _ = insert_measurements(
-        &pool,
+    let _ = sqlx::query(
+        "INSERT INTO measurements (ts, user_id, source, device_id, metric, value, unit)
+         VALUES ($1, $2, 'manual', NULL, $3, $4, $5)
+         ON CONFLICT (user_id, metric, ts) DO NOTHING",
+    )
+    .bind(entry.consumed_at)
+    .bind(user.0)
+    .bind(metric)
+    .bind(entry.amount)
+    .bind(unit)
+    .execute(&mut *tx)
+    .await?;
+
+    // Audit in the same transaction so the entry is always revertible.
+    log_action(
+        &mut tx,
         user.0,
-        "manual",
-        None,
-        &[Measurement::new(entry.consumed_at, metric, entry.amount, unit)],
+        KIND_NUTRITION,
+        "nutrition",
+        json!({
+            "id": row.id,
+            "kind": &kind,
+            "amount": entry.amount,
+            "protein": entry.protein,
+            "carbs": entry.carbs,
+            "fat": entry.fat,
+            "mealType": &entry.meal_type,
+            "note": &entry.note,
+            "ts": entry.consumed_at,
+        }),
+        json!({
+            "id": row.id,
+            "kind": &kind,
+            "amount": entry.amount,
+            "mealType": &entry.meal_type,
+            "note": &entry.note,
+            "ts": entry.consumed_at,
+        }),
     )
     .await?;
+    tx.commit().await?;
 
     Ok(Json(row))
 }

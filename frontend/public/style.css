@@ -669,6 +669,68 @@ select { min-width: 120px; }
 .bar-fill { height: 100%; background: var(--red); }
 @media (max-width: 640px) { .target-row { grid-template-columns: 1fr; } }
 
+/* Leonidas labeled sections: h3 + hairline, grouped inputs. */
+.goal-section { margin-bottom: 18px; }
+.goal-section:last-child { margin-bottom: 0; }
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+.section-head .section-h3 { margin: 0; padding: 0; border-bottom: none; }
+.section-h3 {
+  color: var(--red);
+  font-family: "Anton", "Arial Narrow", sans-serif;
+  font-size: 13px;
+  letter-spacing: 0.18em;
+  margin: 0 0 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+.hairline { border: none; border-top: 1px solid var(--line); margin: 16px 0; }
+.target-progress { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.target-hint { font-size: 10px; letter-spacing: 0.06em; color: var(--muted); }
+.pythia-btn { border-color: var(--red); color: var(--red-bright); }
+.pythia-btn:hover { background: var(--red); color: #000; box-shadow: 0 0 18px var(--glow); }
+.measure-list { max-height: 260px; }
+
+/* Skopos persisted action log. */
+.action-list { max-height: 340px; }
+.action-kind { flex: 0 0 auto; width: 110px; color: var(--red); font-size: 10px; letter-spacing: 0.14em; }
+.action-target { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.action-reverted {
+  flex: 0 0 auto;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  padding: 3px 8px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+}
+
+/* Collapsible advanced config (Nomoi AI provider). */
+details.advanced {
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  padding: 10px 12px;
+}
+details.advanced summary {
+  cursor: pointer;
+  color: var(--red);
+  font-family: "Anton", "Arial Narrow", sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  list-style: none;
+}
+details.advanced summary::-webkit-details-marker { display: none; }
+details.advanced summary::before { content: "▸ "; color: var(--dim); }
+details.advanced[open] summary::before { content: "▾ "; }
+details.advanced[open] summary { margin-bottom: 12px; }
+details.advanced .settings-grid { margin-top: 10px; }
+
 /* ---------------- Rank ladder ---------------- */
 
 .rank-ladder { list-style: none; display: flex; flex-direction: column; gap: 6px; }
@@ -928,13 +990,25 @@ html, body { overflow-x: hidden; }
   right: 22px;
   bottom: 74px;
   z-index: 70;
-  width: min(420px, calc(100vw - 44px));
-  max-height: min(78vh, 680px);
+  width: min(560px, 92vw);
+  height: min(70vh, 560px);
+  min-width: 320px;
+  min-height: 320px;
   display: flex;
   flex-direction: column;
+  /* The oracle is resizable by the user (drag the corner). */
+  resize: both;
+  overflow: auto;
   background: linear-gradient(180deg, var(--panel-2), var(--panel));
-  border: 1px solid var(--red-dark);
-  box-shadow: 0 0 24px rgba(229, 57, 53, 0.16), 0 18px 40px rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--red-bright);
+  box-shadow: 0 0 18px rgba(229, 57, 53, 0.45), 0 0 46px rgba(229, 57, 53, 0.45), 0 18px 40px rgba(0, 0, 0, 0.6);
+  animation: oracle-glow 2.6s ease-in-out infinite;
+}
+
+/* Pulsing red aura — the oracle's special glow. */
+@keyframes oracle-glow {
+  0%, 100% { box-shadow: 0 0 18px rgba(229, 57, 53, 0.45), 0 0 46px rgba(229, 57, 53, 0.45), 0 18px 40px rgba(0, 0, 0, 0.6); }
+  50%      { box-shadow: 0 0 18px rgba(229, 57, 53, 0.8), 0 0 46px rgba(229, 57, 53, 0.8), 0 18px 40px rgba(0, 0, 0, 0.6); }
 }
 
 .oracle-head {
