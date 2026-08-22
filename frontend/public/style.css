@@ -94,8 +94,8 @@ h1, h2, h3 {
 .brand-row { display: flex; align-items: center; }
 
 /* Spartan lambda emblem (inline SVG): top-right of the header, same height as
-   the EPHORIX wordmark. The SVG is transparent, so the pulsing ember glow in
-   the lambda-glow animation traces the lambda + flames, not a rectangle. */
+   the EPHORIX wordmark. The SVG is transparent, so the pulsing glow in the
+   lambda-glow animation traces the spear-lambda mark, not a rectangle. */
 .brand-lambda {
   height: 96px;
   width: auto;
@@ -1053,8 +1053,8 @@ html, body { overflow-x: hidden; }
 }
 
 /* ---------------------------------------------------------------------------
-   Brand lambda emblem (header): pulsing ember glow, flickering flames, and
-   rising embers on the inline SVG in app.rs. Pure CSS keyframes — no JS. */
+   Brand lambda emblem (header): pulsing drop-shadow glow on the inline SVG
+   in app.rs. Pure CSS keyframes — no JS. */
 .brand-lambda {
   animation: lambda-glow 3.2s ease-in-out infinite;
 }
@@ -1064,28 +1064,6 @@ html, body { overflow-x: hidden; }
   50%      { filter: drop-shadow(0 0 26px rgba(229, 57, 53, 0.65)); }
 }
 
-.brand-flame {
-  transform-box: fill-box;
-  transform-origin: 50% 100%;
-  animation: lambda-flicker 1.1s ease-in-out infinite;
-}
-
-@keyframes lambda-flicker {
-  0%, 100% { transform: scaleY(1) scaleX(1); opacity: 1; }
-  50%      { transform: scaleY(1.14) scaleX(0.92); opacity: 0.82; }
-}
-
-.brand-ember {
-  animation: lambda-ember-rise 2.4s linear infinite;
-  animation-fill-mode: both; /* keep embers invisible during their delay gap */
-}
-
-@keyframes lambda-ember-rise {
-  0%   { transform: translate(0, 0); opacity: 0; }
-  12%  { opacity: 1; }
-  100% { transform: translate(3px, -46px); opacity: 0; }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .brand-lambda, .brand-flame, .brand-ember { animation: none; }
+  .brand-lambda { animation: none; }
 }

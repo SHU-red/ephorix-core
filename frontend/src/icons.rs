@@ -56,10 +56,13 @@ pub fn glyph_key(icon: &str) -> &'static str {
     }
 }
 
-/// The primary mark: the Lakedaimonian lambda.
+/// The primary mark: the Lakedaimonian lambda — an upward Λ with epigraphic
+/// serif feet and an inner spear shaft (apex at top; the old mark was drawn
+/// upside-down as a V). Self-contained SVG, no defs/ids.
 pub const LAMBDA: &str = concat!(
     r##"<svg viewBox="0 0 24 24" fill="none" stroke="#E53935" stroke-width="2.6" stroke-linecap="square">"##,
-    r##"<path d="M4 4 L12 19 L20 4"/>"##,
+    r##"<path d="M5 19.5 L12 3.5 L19 19.5 M3 19.5 L7.5 19.5 M16.5 19.5 L21 19.5"/>"##,
+    r##"<path d="M12 3.5 L13 9 L13 19.5 L11 19.5 L11 9 Z" fill="#E53935"/>"##,
     r##"</svg>"##,
 );
 
