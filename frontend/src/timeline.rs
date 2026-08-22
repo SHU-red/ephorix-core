@@ -12,9 +12,11 @@
 use leptos::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::cell::RefCell;
+use std::rc::Rc;
 use wasm_bindgen::{closure::Closure, prelude::wasm_bindgen, JsCast};
 
-use crate::api::{fmt_time, ms_from_iso, AgogeSession, AgogeType, BatterySeriesPoint, NutritionEvent, SleepDay, TimelinePoint};
+use crate::api::{ms_from_iso, AgogeSession, AgogeType, BatterySeriesPoint, NutritionEvent, SleepDay, TimelinePoint};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -304,6 +306,93 @@ pub fn TimelineChart(
         }
     };
 
+    // Rich workout hover popup. ONE delegated pointer handler set on the strip
+    // (pointerenter/pointermove/pointerleave). The popup div is appended to the
+    // strip's PARENT (the workout row) so the slot's `overflow:hidden` never
+    // clips it, and it is `position:fixed` at the cursor — the same visual
+    // language as .ephorix-tooltip — so page scroll cannot detach it. The
+    // `data-session-id` click behavior above is untouched.
+    let popup_cache: Rc<RefCell<Option<web_sys::HtmlDivElement>>> = Rc::new(RefCell::new(None));
+    let on_workout_popup = {
+        let popup_cache = popup_cache.clone();
+        move |ev: web_sys::PointerEvent| {
+            // Derive the strip/row from the event TARGET's ancestors, not
+            // currentTarget: pointermove bubbles, so Leptos delegates it at
+            // the document level and currentTarget is not the strip.
+            let Some(target) = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) else { return };
+            let Some(row) = target
+                .closest(".workout-strip")
+                .ok()
+                .flatten()
+                .and_then(|strip| strip.parent_element())
+            else { return };
+            let hit = target.closest("[data-session-id]").ok().flatten();
+            let Some(slot) = hit else {
+                // Hide but KEEP the cached element so re-entry reuses it
+                // (take() would orphan the div and leak one per cycle).
+                if let Some(p) = popup_cache.borrow().as_ref() {
+                    p.style().set_property("display", "none").ok();
+                }
+                return;
+            };
+            let doc = web_sys::window().unwrap().document().unwrap();
+            // Look up or lazily create the popup under ONE RefMut borrow, so
+            // the cache can never be double-borrowed. The borrow ends when
+            // this block does.
+            let popup = {
+                let mut cache = popup_cache.borrow_mut();
+                if let Some(p) = cache.as_ref() {
+                    p.clone()
+                } else {
+                    let p = doc
+                        .create_element("div")
+                        .unwrap()
+                        .dyn_into::<web_sys::HtmlDivElement>()
+                        .unwrap();
+                    p.set_class_name("workout-popup");
+                    let _ = row.append_child(&p);
+                    let _ = cache.insert(p.clone());
+                    p
+                }
+            };
+            // Rebuild only when the hovered slot (payload) changes.
+            if let Some(payload) = slot.get_attribute("data-popup") {
+                if popup.get_attribute("data-payload") != Some(payload.clone()) {
+                    render_workout_popup(&popup, &payload);
+                    let _ = popup.set_attribute("data-payload", &payload);
+                }
+            }
+            let _ = popup.style().set_property("display", "block");
+            // Fixed positioning at the cursor; flip across when the popup would
+            // overflow the viewport (narrow/mobile windows).
+            let vw = web_sys::window().unwrap();
+            let width = popup.client_width() as f64;
+            let height = popup.client_height() as f64;
+            let mut left = ev.client_x() as f64 + 14.0;
+            let inner_w = vw.inner_width().ok().and_then(|w| w.as_f64()).unwrap_or(0.0);
+            if left + width > inner_w {
+                left = ev.client_x() as f64 - width - 14.0;
+            }
+            left = left.max(8.0); // never off the left edge (CSS caps width <= 100vw-16)
+            let mut top = ev.client_y() as f64 + 14.0;
+            let inner_h = vw.inner_height().ok().and_then(|h| h.as_f64()).unwrap_or(0.0);
+            if top + height > inner_h {
+                top = ev.client_y() as f64 - height - 14.0;
+            }
+            top = top.max(8.0);
+            let _ = popup.style().set_property("left", &format!("{left}px"));
+            let _ = popup.style().set_property("top", &format!("{top}px"));
+        }
+    };
+    let on_workout_popup_leave = {
+        let popup_cache = popup_cache.clone();
+        move |_ev: web_sys::PointerEvent| {
+            if let Some(p) = popup_cache.borrow().as_ref() {
+                p.style().set_property("display", "none").ok();
+            }
+        }
+    };
+
     view! {
         <div class="chart-row">
             <div class="chart-wrap">
@@ -336,7 +425,7 @@ pub fn TimelineChart(
         </div>
         <div class="workout-row">
             <div class="workout-gutter"></div>
-            <div node_ref=workout_ref class="workout-strip" on:click=on_marker_click></div>
+            <div node_ref=workout_ref class="workout-strip" on:click=on_marker_click on:pointerenter=on_workout_popup.clone() on:pointermove=on_workout_popup.clone() on:pointerleave=on_workout_popup_leave.clone()></div>
             <div class="workout-gutter-right"></div>
             <aside class="legend-sidebar">
                 <div class="legend-item">
@@ -368,6 +457,9 @@ fn build_opts(width: i32) -> serde_json::Value {
     json!({
         "width": width,
         "height": 440,
+        // Sentinel consumed by uplot-bridge.js: paints subtle weekend bands
+        // (local Sat+Sun) behind the series.
+        "weekendFill": "rgba(144, 164, 174, 0.055)",
         "legend": { "show": false },
         "cursor": { "show": true, "points": { "show": true } },
         "select": { "show": false },
@@ -378,8 +470,8 @@ fn build_opts(width: i32) -> serde_json::Value {
             "y3": { "range": [0, null] }
         },
         "axes": [
-            { "side": 2, "size": 32, "stroke": "#3a3a3a", "grid": { "show": false },
-              "ticks": { "size": 80 }, "font": "10px 'IBM Plex Mono', monospace",
+            { "side": 2, "size": 32, "stroke": "#4a4a4a", "grid": { "show": false },
+              "ticks": { "size": 80 }, "font": "11px 'IBM Plex Mono', monospace",
               "values": "__ephorix_time__" },
             { "side": 3, "size": 46, "stroke": "#e53935", "grid": { "show": true, "stroke": "#141414" },
               "ticks": { "size": 50 }, "font": "10px 'IBM Plex Mono', monospace" },
@@ -416,6 +508,8 @@ fn build_battery_opts(width: i32) -> serde_json::Value {
     json!({
         "width": width,
         "height": 180,
+        // Same weekend-band sentinel as the main chart (see build_opts).
+        "weekendFill": "rgba(144, 164, 174, 0.055)",
         "legend": { "show": false },
         "cursor": { "show": true },
         "select": { "show": false },
@@ -425,8 +519,8 @@ fn build_battery_opts(width: i32) -> serde_json::Value {
             "y2": { "range": [0, 300] }
         },
         "axes": [
-            { "side": 2, "size": 32, "stroke": "#3a3a3a", "grid": { "show": false },
-              "ticks": { "size": 80 }, "font": "10px 'IBM Plex Mono', monospace",
+            { "side": 2, "size": 32, "stroke": "#4a4a4a", "grid": { "show": false },
+              "ticks": { "size": 80 }, "font": "11px 'IBM Plex Mono', monospace",
               "values": "__ephorix_time__" },
             { "side": 3, "size": 46, "stroke": "#90a4ae", "grid": { "show": true, "stroke": "#141414" },
               "ticks": { "size": 50 }, "font": "10px 'IBM Plex Mono', monospace" },
@@ -438,7 +532,7 @@ fn build_battery_opts(width: i32) -> serde_json::Value {
         "series": [
             {},
             { "label": "Stress", "stroke": "#90a4ae", "width": 1.5,
-              "fill": "rgba(144, 164, 174, 0.5)", "bars": true, "spanGaps": false,
+              "fill": "rgba(144, 164, 174, 0.14)", "spanGaps": false,
               "points": { "show": false } },
             { "label": "Body battery", "stroke": "#e53935", "width": 2.5, "scale": "y2",
               "fill": "rgba(229, 57, 53, 0.15)", "spanGaps": false,
@@ -540,9 +634,107 @@ fn hhmm(ms: f64) -> String {
     format!("{:02}:{:02}", d.get_hours(), d.get_minutes())
 }
 
+/// Popup date label, mirroring the x-axis tick styles: "SA 15" / "SO 15" on
+/// weekends, "Mon 5 Aug" otherwise (all local time).
+fn popup_date(ms: f64) -> String {
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms));
+    let dow = d.get_day();
+    let day = d.get_date();
+    match dow {
+        0 => format!("SO {day}"),
+        6 => format!("SA {day}"),
+        _ => format!("{} {day} {}", WEEKDAYS[dow as usize], MONTHS[(d.get_month()) as usize]),
+    }
+}
+
+/// Escape a value for injection into the popup's innerHTML (workout names and
+/// glyphs come from the API, so never splice them in raw).
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Fill a `.workout-popup` div from the slot's `data-popup` JSON payload:
+/// icon + name header, date · range line, duration, and the watch summary
+/// stats (each "—" when the field is absent).
+fn render_workout_popup(popup: &web_sys::HtmlDivElement, payload: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else { return };
+    let str_of = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
+    let name = html_escape(str_of("name"));
+    let icon = html_escape(str_of("icon"));
+    let color = html_escape(str_of("color"));
+    let date = html_escape(str_of("date"));
+    let start = html_escape(str_of("start"));
+    let end = html_escape(str_of("end"));
+    let duration = html_escape(str_of("duration"));
+    let dur_val = v
+        .get("durationSec")
+        .and_then(|x| x.as_i64())
+        .map(|s| format!("{} min", (s.max(0) as f64 / 60.0).round() as i64))
+        .unwrap_or_else(|| "—".to_string());
+    let kcal = v
+        .get("workoutKcal")
+        .and_then(|x| x.as_f64())
+        .map(|x| format!("{} kcal", x.round() as i64))
+        .unwrap_or_else(|| "—".to_string());
+    let hr = v
+        .get("avgHr")
+        .and_then(|x| x.as_i64())
+        .map(|x| format!("{x} bpm"))
+        .unwrap_or_else(|| "—".to_string());
+    let reps = v
+        .get("reps")
+        .and_then(|x| x.as_i64())
+        .map(|x| x.to_string())
+        .unwrap_or_else(|| "—".to_string());
+    let dist = v
+        .get("distanceM")
+        .and_then(|x| x.as_f64())
+        .map(|m| {
+            if m >= 1000.0 {
+                format!("{:.1} km", m / 1000.0)
+            } else {
+                format!("{} m", m.round() as i64)
+            }
+        })
+        .unwrap_or_else(|| "—".to_string());
+    popup.set_inner_html(&format!(
+        "<div class=\"wp-head\"><span class=\"wp-icon\" style=\"color:{color}\">{icon}</span>\
+         <span class=\"wp-name\">{name}</span></div>\
+         <div class=\"wp-meta\">{date} <span class=\"wp-sep\">·</span> {start}–{end}</div>\
+         <div class=\"wp-dur\">{duration}</div>\
+         <div class=\"wp-stats\">\
+           <div class=\"wp-stat\"><span>Duration</span><b>{dur_val}</b></div>\
+           <div class=\"wp-stat\"><span>Calories</span><b>{kcal}</b></div>\
+           <div class=\"wp-stat\"><span>Avg HR</span><b>{hr}</b></div>\
+           <div class=\"wp-stat\"><span>Reps</span><b>{reps}</b></div>\
+           <div class=\"wp-stat\"><span>Distance</span><b>{dist}</b></div>\
+         </div>"
+    ));
+}
+
 /// Workout timeline strip: one labeled, colored slot per session, positioned
 /// in plot-relative px (like `render_overlay`) so the slots track the
-/// current x-domain as the user zooms.
+/// current x-domain as the user zooms. Each slot always carries the type
+/// glyph (`.workout-slot-icon`); narrow slots (<44px) hide the label and
+/// center the glyph. Rich hover details travel as JSON in `data-popup`
+/// (replaces the native title) and are rendered by the delegated pointer
+/// handlers in `TimelineChart`.
 fn render_workout_strip(
     container: &leptos::html::HtmlElement<leptos::html::Div>,
     chart_id: u32,
@@ -577,16 +769,49 @@ fn render_workout_strip(
         let matched = s.type_id.as_ref().and_then(|tid| types.iter().find(|t| &t.id == tid));
         let color = matched.map(|t| t.color_code.clone()).unwrap_or_else(|| "#7B0000".to_string());
         let name = matched.map(|t| t.name.clone()).unwrap_or_else(|| "Undefined".to_string());
+        let icon = matched
+            .map(|t| t.icon.clone())
+            .filter(|i| !i.is_empty())
+            .unwrap_or_else(|| "Λ".to_string());
 
         let el = doc
             .create_element("div")
             .unwrap()
             .dyn_into::<web_sys::HtmlDivElement>()
             .unwrap();
-        el.set_class_name(if s.status == "active" { "workout-slot open" } else { "workout-slot" });
+        let mut classes = if s.status == "active" { "workout-slot open" } else { "workout-slot" }.to_string();
+        if w < 44.0 {
+            classes.push_str(" narrow");
+        }
+        el.set_class_name(&classes);
         let _ = el.set_attribute("data-session-id", &s.id);
-        let _ = el.set_attribute("title", &format!("{name} · {} – {}", fmt_time(from), fmt_time(to)));
+        // Rich hover payload (native title removed; the popup replaces it).
+        let dur_min = s
+            .duration_sec
+            .map(|sec| sec as f64 / 60.0)
+            .unwrap_or_else(|| (to - from) / 60_000.0);
+        let payload = json!({
+            "name": name,
+            "icon": icon,
+            "color": color,
+            "date": popup_date(from),
+            "start": hhmm(from),
+            "end": hhmm(to),
+            "duration": format!("{} min", (dur_min.max(1.0)).round() as i64),
+            "durationSec": s.duration_sec,
+            "workoutKcal": s.workout_kcal,
+            "avgHr": s.avg_hr,
+            "reps": s.reps,
+            "distanceM": s.distance_m,
+        });
+        let _ = el.set_attribute("data-popup", &payload.to_string());
         let _ = el.set_attribute("style", &format!("left:{left}px;width:{w}px;background:{color};"));
+
+        let icon_el = doc.create_element("span").unwrap();
+        icon_el.set_class_name("workout-slot-icon");
+        icon_el.set_text_content(Some(&icon));
+        let _ = el.append_child(&icon_el);
+
         let label = doc.create_element("span").unwrap();
         label.set_class_name("workout-slot-label");
         label.set_text_content(Some(&format!("{name}  {}–{}", hhmm(from), hhmm(to))));

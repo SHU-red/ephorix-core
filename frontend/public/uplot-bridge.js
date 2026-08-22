@@ -30,8 +30,9 @@
   /* X-axis label, driven by the tick INCREMENT (not the dataset span), so the
      unit scales with the zoom level:
        < 1 day    -> "14:30"
-       < 7 days   -> "Mon 5"        (days)
-       < 28 days  -> "5 Aug"        (weeks)
+       < 7 days   -> "Mon 5" | "SA 15" / "SO 15" on weekends (days)
+       < 28 days  -> "Mon 5 Aug"  (weeks; weekday prefix keeps the current day
+                                    identifiable at month zoom)
        < 366 days -> "Aug" / "Aug '26" (months; year shown on January)
        >= 1 year  -> "2026"         (years)
      Resolves the "__ephorix_time__" sentinel injected from Rust opts JSON. */
@@ -41,10 +42,15 @@
       return pad(d.getHours()) + ":" + pad(d.getMinutes());
     }
     if (incrMs < 7 * DAY_MS) {
-      return DAYS[d.getDay()] + " " + d.getDate();
+      var dow = d.getDay();
+      // Weekends get a distinct SA/SO marker (all local time) so rest days
+      // read at a glance against the weekday "Mon 5" style.
+      if (dow === 6) return "SA " + d.getDate();
+      if (dow === 0) return "SO " + d.getDate();
+      return DAYS[dow] + " " + d.getDate();
     }
     if (incrMs < 28 * DAY_MS) {
-      return d.getDate() + " " + MONTHS[d.getMonth()];
+      return DAYS[d.getDay()] + " " + d.getDate() + " " + MONTHS[d.getMonth()];
     }
     if (incrMs < 366 * DAY_MS) {
       var m = MONTHS[d.getMonth()];
@@ -103,12 +109,56 @@
     });
   }
 
+  /* Subtle local-timezone weekend bands (Sat + Sun) painted BEHIND the data,
+     enabled by the `weekendFill` opts sentinel from Rust. Installed on
+     hooks.drawClear, NOT hooks.draw: in uPlot 1.6.x the default drawOrder
+     runs ["axes", "series"] BEFORE the `draw` hook fires, so `draw` would
+     paint over the series; drawClear runs right after the canvas clear and
+     before every drawOrder pass. Push-only — never overwrite existing hooks.
+     Only days inside [u.scales.x.min, u.scales.x.max] are painted, so zoomed
+     views stay cheap. */
+  function installWeekendBands(c, fill) {
+    if (!c.hooks.drawClear) c.hooks.drawClear = [];
+    c.hooks.drawClear.push(function (u) {
+      var xmin = u.scales.x.min;
+      var xmax = u.scales.x.max;
+      if (xmin == null || xmax == null) return;
+      var b = u.bbox;
+      if (!b || b.width <= 0 || b.height <= 0) return;
+      var ctx = u.ctx;
+      ctx.fillStyle = fill;
+      // Walk local midnights across the visible domain. Advancing via the
+      // Date constructor (year, month, date + 1) normalizes DST and month/
+      // year rollover, so every band stays a whole local day.
+      var d = new Date(xmin);
+      d.setHours(0, 0, 0, 0);
+      while (d.getTime() <= xmax) {
+        var dow = d.getDay();
+        if (dow === 6 || dow === 0) {
+          var next = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0);
+          // u.valToPos is plot-relative (0..bbox.width); the canvas spans the
+          // full chart, so offset by bbox.left. Clamp to the plot area.
+          var L = Math.max(u.valToPos(Math.max(d.getTime(), xmin), "x") + b.left, b.left);
+          var R = Math.min(u.valToPos(Math.min(next.getTime(), xmax), "x") + b.left, b.left + b.width);
+          if (R > L) {
+            ctx.fillRect(L, b.top, R - L, b.height);
+          }
+          d = next;
+        } else {
+          d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0);
+        }
+      }
+    });
+  }
+
   function create(elId, optsJson, dataJson) {
     var el = document.getElementById(elId);
     if (!el) throw new Error("ephorix-bridge: no element #" + elId);
 
     var opts = JSON.parse(optsJson);
     var data = JSON.parse(dataJson);
+    var weekendFill = opts.weekendFill;
+    delete opts.weekendFill;
 
     // Bars and hover points are requested declaratively from Rust; resolve
     // to uPlot paths / point functions here. Capture tooltip labels + colors
@@ -140,6 +190,7 @@
     var id = nextId++;
     charts.set(id, chart);
     setupTooltip(chart, seriesMeta);
+    if (weekendFill) installWeekendBands(chart, weekendFill);
 
     // Re-measure on container resize (window resize / device orientation):
     // uPlot bakes a fixed px width at creation, so without this the chart
