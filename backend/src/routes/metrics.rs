@@ -78,9 +78,9 @@ pub async fn body_battery(
     let days: Vec<DayAggregate> = sqlx::query_as(
         "SELECT
             date_trunc('day', ts)::date AS day,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'sleep_seconds'), 0)::float8 AS sleep_s,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'active_calories'), 0)::float8 AS kcal,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'steps'), 0)::float8 AS steps,
+            COALESCE(MAX(value) FILTER (WHERE metric = 'sleep_seconds'), 0)::float8 AS sleep_s,
+            COALESCE(MAX(value) FILTER (WHERE metric = 'active_calories'), 0)::float8 AS kcal,
+            COALESCE(MAX(value) FILTER (WHERE metric = 'steps'), 0)::float8 AS steps,
             COALESCE(AVG(value) FILTER (WHERE metric = 'heart_rate'), 0)::float8 AS avg_hr
          FROM measurements
          WHERE user_id = $1 AND ts >= $2 AND ts < $3
@@ -191,15 +191,31 @@ async fn battery_series_inner(
     let rows: Vec<SeriesBucket> = sqlx::query_as(
         "SELECT
             (EXTRACT(EPOCH FROM gs.b) * 1000)::float8 AS ts,
-            COALESCE(SUM(m.value) FILTER (WHERE m.metric = 'sleep_seconds'), 0)::float8 AS sleep_s,
-            COALESCE(SUM(m.value) FILTER (WHERE m.metric = 'active_calories'), 0)::float8 AS kcal,
-            COALESCE(SUM(m.value) FILTER (WHERE m.metric = 'steps'), 0)::float8 AS steps,
+            COALESCE(SUM(d.value) FILTER (WHERE d.metric = 'sleep_seconds'), 0)::float8 AS sleep_s,
+            COALESCE(SUM(d.value) FILTER (WHERE d.metric = 'active_calories'), 0)::float8 AS kcal,
+            COALESCE(SUM(d.value) FILTER (WHERE d.metric = 'steps'), 0)::float8 AS steps,
             COALESCE(SUM(m.value) FILTER (WHERE m.metric = 'movement_intensity'), 0)::float8 AS movement,
             AVG(m.value) FILTER (WHERE m.metric = 'heart_rate')::float8 AS avg_hr
          FROM generate_series($3, $4 - $1::interval, $1::interval) AS gs(b)
+         LEFT JOIN (
+             -- steps/active_calories/sleep rows are CUMULATIVE day totals
+             -- (watch: sum since UTC midnight; the noon-anchored backfill row
+             -- is the authoritative final total). Keep ONE row per (UTC day,
+             -- metric) — the largest value — so summing across buckets cannot
+             -- double-count a day's totals.
+             SELECT DISTINCT ON (date_trunc('day', ts), metric)
+                    ts, metric, value
+             FROM measurements
+             WHERE user_id = $2
+               AND metric IN ('sleep_seconds', 'active_calories', 'steps')
+               AND ts >= $3 AND ts < $4
+             ORDER BY date_trunc('day', ts), metric, value DESC, ts
+         ) d
+           ON d.ts >= gs.b
+           AND d.ts < gs.b + $1::interval
          LEFT JOIN measurements m
            ON m.user_id = $2
-           AND m.metric IN ('sleep_seconds', 'active_calories', 'steps', 'movement_intensity', 'heart_rate')
+           AND m.metric IN ('movement_intensity', 'reps', 'heart_rate')
            AND m.ts >= gs.b
            AND m.ts < gs.b + $1::interval
          GROUP BY gs.b
@@ -663,9 +679,9 @@ async fn fetch_day_aggregates(
     let rows: Vec<DayAggregate> = sqlx::query_as(
         "SELECT
             date_trunc('day', ts)::date AS day,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'sleep_seconds'), 0)::float8 AS sleep_s,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'active_calories'), 0)::float8 AS kcal,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'steps'), 0)::float8 AS steps,
+            COALESCE(MAX(value) FILTER (WHERE metric = 'sleep_seconds'), 0)::float8 AS sleep_s,
+            COALESCE(MAX(value) FILTER (WHERE metric = 'active_calories'), 0)::float8 AS kcal,
+            COALESCE(MAX(value) FILTER (WHERE metric = 'steps'), 0)::float8 AS steps,
             COALESCE(AVG(value) FILTER (WHERE metric = 'heart_rate'), 0)::float8 AS avg_hr
          FROM measurements
          WHERE user_id = $1 AND ts >= $2 AND ts < $3
