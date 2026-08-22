@@ -545,6 +545,9 @@ pub fn App() -> impl IntoView {
     let (sessions, set_sessions) = create_signal(Vec::<AgogeSession>::new());
     let (points, set_points) = create_signal(Vec::<TimelinePoint>::new());
     let (selection, set_selection) = create_signal(None::<(f64, f64)>);
+    // Point cursor for the contextual select-mode actions: planted by a clean
+    // chart click, cleared whenever a range selection takes over.
+    let (point_ts, set_point_ts) = create_signal(None::<f64>);
     let (cursor, set_cursor) = create_signal(None::<f64>);
     let (error, set_error) = create_signal(None::<String>);
     let (selected_type, set_selected_type) = create_signal(None::<String>);
@@ -838,19 +841,85 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    // "SET CLOSE POINT": targets the user's OPEN agoge session — selects it,
-    // cancels any other pick, and enters End-pick mode. The next chart click
-    // closes the session at that time (see handle_chart_click).
-    let begin_close_open = move |_| {
-        let Some(open) = sessions.get().into_iter().find(|s| s.status == "active") else {
-            set_error.set(Some("no open agoge session".to_string()));
+    // A range selection and the point cursor are mutually exclusive: once a
+    // drag lands a selection, drop any point marker (and vice versa, the
+    // click handler clears the selection when planting a point).
+    create_effect(move |_| {
+        if selection.get().is_some() {
+            set_point_ts.set(None);
+        }
+    });
+
+    // "AGOGE START": begin an open agoge session at the pointed instant,
+    // typed by the lower agoge-type bar (selected_type).
+    let agoge_start = move |_| {
+        let Some(ts) = point_ts.get() else {
+            set_error.set(Some("click the timeline to place the start point".to_string()));
             return;
         };
-        set_pick_field.set(None);
-        set_pick_mode.set(false);
-        selected_session.set(Some(open));
-        set_pick_field.set(Some(PickField::End));
-        set_pick_mode.set(true);
+        if sessions.get().into_iter().any(|s| s.status == "active") {
+            set_error.set(Some("an agoge is already open — set its end instead".to_string()));
+            return;
+        }
+        let Some(type_id) = selected_type.get() else {
+            set_error.set(Some("choose an agoge type below".to_string()));
+            return;
+        };
+        let base = base.get();
+        let token = token.get();
+        let body = json!({
+            "typeId": type_id,
+            "startTime": iso_from_ms(ts),
+            "endTime": null,
+        });
+        spawn_local(async move {
+            match post_json(&base, &token, "/api/v1/agoge-sessions", &body).await {
+                Ok(_) => {
+                    set_point_ts.set(None);
+                    refresh();
+                }
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    };
+
+    // "AGOGE END": close the user's OPEN agoge session at the pointed instant
+    // and post the stop marker (mirrors the removed close-open flow; marker
+    // failures are ignored).
+    let agoge_end = move |_| {
+        let Some(ts) = point_ts.get() else {
+            set_error.set(Some("click the timeline to place the end point".to_string()));
+            return;
+        };
+        let Some(open) = sessions.get().into_iter().find(|s| s.status == "active") else {
+            set_error.set(Some("no open agoge".to_string()));
+            return;
+        };
+        let id = open.id.clone();
+        let end = iso_from_ms(ts);
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            let _ = post_json(
+                &base,
+                &token,
+                "/api/v1/events/marker",
+                &json!({
+                    "kind": "stop",
+                    "sessionId": id.clone(),
+                    "occurredAt": end,
+                    "source": "web"
+                }),
+            )
+            .await;
+            match patch_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}"), &json!({ "endTime": end })).await {
+                Ok(_) => {
+                    set_point_ts.set(None);
+                    refresh();
+                }
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
     };
 
     let set_range_days = move |d: i64| {
@@ -886,10 +955,13 @@ pub fn App() -> impl IntoView {
     // Clean left-click on empty plot area: in pick mode it plants the picked
     // start/end on the selected session — an End pick on the open session also
     // posts the stop marker (mirrors the close-open flow). Without a pick
-    // active, a clean click does nothing: sessions are only created via
-    // "CREATE AGOGE FROM SELECTION", never by an accidental chart click.
+    // active, the click plants the point cursor (AGOGE START/END targets) and
+    // drops any range selection; sessions are created via the contextual
+    // select-mode actions, never by an accidental chart click.
     let handle_chart_click = move |ts: f64| {
         let Some(field) = pick_field.get() else {
+            set_point_ts.set(Some(ts));
+            set_selection.set(None);
             return;
         };
         let Some(s) = selected_session.get() else {
@@ -1756,23 +1828,29 @@ pub fn App() -> impl IntoView {
                                     <button class:on=move || !zoom_mode.get() on:click=move |_| set_zoom_mode.set(false)>"SELECT"</button>
                                 </div>
                                 <Show when=move || !zoom_mode.get() fallback=|| ()>
-                                    <div class="select-actions">
-                                        <button class="btn" on:click=create_from_selection>"CREATE AGOGE FROM SELECTION"</button>
-                                        <button class="btn" on:click=begin_close_open>"SET CLOSE POINT"</button>
-                                        <label class="ctl">
-                                            "TYPE"
-                                            <select on:change=move |ev| set_selected_type.set(option_value(&ev))>
-                                                <option value="">"UNDEFINED"</option>
-                                                <For each=move || types.get() key=|t| t.id.clone() let:t>
-                                                    <option value=t.id.clone()>{t.name.clone()}</option>
-                                                </For>
-                                            </select>
-                                        </label>
-                                        <span class="muted selection-readout">
-                                            "SELECTION: "
-                                            {move || selection.get().map(|(f, t)| format!("{} → {}", fmt_time(f.min(t)), fmt_time(f.max(t)))).unwrap_or_else(|| "—".to_string())}
-                                        </span>
-                                    </div>
+                                    <Show when=move || selection.get().is_some() || point_ts.get().is_some() fallback=|| ()>
+                                        <div class="select-box">
+                                            <Show when=move || selection.get().is_some() fallback=|| ()>
+                                                <div class="select-actions">
+                                                    <button class="btn" on:click=create_from_selection>"AGOGE FROM SELECTION"</button>
+                                                    <span class="muted selection-readout">
+                                                        "SELECTION: "
+                                                        {move || selection.get().map(|(f, t)| format!("{} → {}", fmt_time(f.min(t)), fmt_time(f.max(t)))).unwrap_or_else(|| "—".to_string())}
+                                                    </span>
+                                                </div>
+                                            </Show>
+                                            <Show when=move || point_ts.get().is_some() fallback=|| ()>
+                                                <div class="select-actions">
+                                                    <button class="btn" on:click=agoge_start>"AGOGE START"</button>
+                                                    <button class="btn" on:click=agoge_end>"AGOGE END"</button>
+                                                    <span class="muted point-readout">
+                                                        "POINT: "
+                                                        {move || point_ts.get().map(fmt_time).unwrap_or_else(|| "—".to_string())}
+                                                    </span>
+                                                </div>
+                                            </Show>
+                                        </div>
+                                    </Show>
                                 </Show>
                             </div>
                             <TimelineChart
@@ -1785,6 +1863,7 @@ pub fn App() -> impl IntoView {
                                 series=series
                                 selection=selection
                                 set_selection=set_selection
+                                point_ts=point_ts
                                 cursor=set_cursor
                                 pick_mode=pick_mode
                                 zoom_mode=zoom_mode
@@ -1795,6 +1874,15 @@ pub fn App() -> impl IntoView {
                                 on_ready=Callback::new(move |id| handle_chart_ready(id))
                                 on_session_click=Callback::new(move |sid| handle_session_click(sid))
                             />
+                            <div class="agoge-type-bar">
+                                <span class="agoge-type-label">"AGOGE TYPE"</span>
+                                <select on:change=move |ev| set_selected_type.set(option_value(&ev))>
+                                    <option value="">"UNDEFINED"</option>
+                                    <For each=move || types.get() key=|t| t.id.clone() let:t>
+                                        <option value=t.id.clone()>{t.name.clone()}</option>
+                                    </For>
+                                </select>
+                            </div>
                             <div class="session-strip">
                                 <For each=move || {
                                     let _ = types.get();

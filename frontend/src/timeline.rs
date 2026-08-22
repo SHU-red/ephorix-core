@@ -118,6 +118,25 @@ fn selection_band_rect(id: u32, a: f64, b: f64) -> Option<(f64, f64)> {
     Some((x, w))
 }
 
+/// Plot-relative x px for a point-instant on chart `id` (valToPos space,
+/// matching `selection_band_rect`). None when the chart isn't ready, has no
+/// plot area, or the instant lies outside the visible x-domain.
+fn point_marker_x(id: u32, ts: f64) -> Option<f64> {
+    if id == 0 {
+        return None;
+    }
+    let bbox: BBox = serde_json::from_str(&ephorix_plot_bbox(id))
+        .unwrap_or(BBox { left: 0.0, top: 0.0, width: 0.0, height: 0.0 });
+    if bbox.width <= 0.0 {
+        return None;
+    }
+    let x = ephorix_val_to_pos(id, ts);
+    if x < -1.0 || x > bbox.width + 1.0 {
+        return None;
+    }
+    Some(x.max(0.0))
+}
+
 #[component]
 pub fn TimelineChart(
     points: ReadSignal<Vec<TimelinePoint>>,
@@ -129,6 +148,7 @@ pub fn TimelineChart(
     series: ReadSignal<SeriesConfig>,
     selection: ReadSignal<Option<(f64, f64)>>,
     set_selection: WriteSignal<Option<(f64, f64)>>,
+    point_ts: ReadSignal<Option<f64>>,
     cursor: WriteSignal<Option<f64>>,
     pick_mode: ReadSignal<bool>,
     zoom_mode: ReadSignal<bool>,
@@ -145,6 +165,10 @@ pub fn TimelineChart(
     let band_main_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let band_strip_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let band_battery_ref: NodeRef<leptos::html::Div> = create_node_ref();
+    // Persistent point-cursor markers (main chart / workout strip / battery).
+    let marker_main_ref: NodeRef<leptos::html::Div> = create_node_ref();
+    let marker_strip_ref: NodeRef<leptos::html::Div> = create_node_ref();
+    let marker_battery_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let chart_id = create_rw_signal(0u32);
     let battery_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let battery_id = create_rw_signal(0u32);
@@ -383,6 +407,66 @@ pub fn TimelineChart(
         }
     });
 
+    // Point-cursor marker: a thin red line across the main chart, the workout
+    // strip, and the body-battery chart at a clicked instant (point_ts).
+    // Repositioned whenever the point or the x-scale changes; hidden when
+    // there is no point. Mutually exclusive with the selection band by
+    // construction (the parent clears one when the other is set).
+    create_effect(move |_| {
+        let pt = point_ts.get();
+        let _ = zoom_version.get();
+        let _ = sessions.get();
+        let _ = types.get();
+        let main_id = chart_id.get();
+        let bat_id = battery_id.get();
+
+        // Main chart marker: absolute inside .chart-wrap, offset to the bbox.
+        if let Some(marker) = marker_main_ref.get() {
+            if let Some(x) = pt.and_then(|ts| point_marker_x(main_id, ts)) {
+                let bbox: BBox = serde_json::from_str(&ephorix_plot_bbox(main_id))
+                    .unwrap_or(BBox { left: 0.0, top: 0.0, width: 0.0, height: 0.0 });
+                let _ = marker.set_attribute(
+                    "style",
+                    &format!(
+                        "left:{}px;top:{}px;height:{}px;display:block;",
+                        bbox.left + x, bbox.top, bbox.height
+                    ),
+                );
+            } else {
+                let _ = marker.set_attribute("style", "display:none");
+            }
+        }
+        // Workout strip marker: plot-relative x, full strip height (CSS).
+        if let Some(marker) = marker_strip_ref.get() {
+            if let Some(x) = pt.and_then(|ts| point_marker_x(main_id, ts)) {
+                if !marker.is_connected() {
+                    if let Some(strip) = workout_ref.get() {
+                        let _ = strip.append_child(&marker);
+                    }
+                }
+                let _ = marker.set_attribute("style", &format!("left:{x}px;display:block;"));
+            } else {
+                let _ = marker.set_attribute("style", "display:none");
+            }
+        }
+        // Battery chart marker: absolute inside .battery-wrap, offset to bbox.
+        if let Some(marker) = marker_battery_ref.get() {
+            if let Some(x) = pt.and_then(|ts| point_marker_x(bat_id, ts)) {
+                let bbox: BBox = serde_json::from_str(&ephorix_plot_bbox(bat_id))
+                    .unwrap_or(BBox { left: 0.0, top: 0.0, width: 0.0, height: 0.0 });
+                let _ = marker.set_attribute(
+                    "style",
+                    &format!(
+                        "left:{}px;top:{}px;height:{}px;display:block;",
+                        bbox.left + x, bbox.top, bbox.height
+                    ),
+                );
+            } else {
+                let _ = marker.set_attribute("style", "display:none");
+            }
+        }
+    });
+
     // Slot/marker click: resolve the nearest [data-session-id] ancestor and
     // hand the session id to the parent for inline editing.
     let on_marker_click = move |ev: web_sys::MouseEvent| {
@@ -492,6 +576,7 @@ pub fn TimelineChart(
                 <div node_ref=chart_ref class="chart" id="ephorix-chart"></div>
                 <div node_ref=overlay_ref class="session-overlay" on:click=on_marker_click></div>
                 <div node_ref=band_main_ref class="sel-band"></div>
+                <div node_ref=marker_main_ref class="cursor-marker"></div>
                 <Show when=move || points.get().is_empty() fallback=|| ()>
                     <div class="chart-empty">
                         <span class="chart-empty-mark" inner_html=crate::icons::LAMBDA></span>
@@ -521,6 +606,7 @@ pub fn TimelineChart(
             <div class="workout-gutter"></div>
             <div node_ref=workout_ref class="workout-strip" on:click=on_marker_click on:pointerenter=on_workout_popup.clone() on:pointermove=on_workout_popup.clone() on:pointerleave=on_workout_popup_leave.clone()>
                 <div node_ref=band_strip_ref class="sel-band"></div>
+                <div node_ref=marker_strip_ref class="cursor-marker"></div>
             </div>
             <div class="workout-gutter-right"></div>
             <aside class="legend-sidebar">
@@ -533,6 +619,7 @@ pub fn TimelineChart(
             <div class="battery-wrap">
                 <div node_ref=battery_ref class="chart" id="ephorix-battery-chart"></div>
                 <div node_ref=band_battery_ref class="sel-band"></div>
+                <div node_ref=marker_battery_ref class="cursor-marker"></div>
             </div>
             <aside class="legend-sidebar">
                 <div class="legend-item">
@@ -567,7 +654,7 @@ fn build_opts(width: i32) -> serde_json::Value {
             "y3": { "range": [0, null] }
         },
         "axes": [
-            { "side": 2, "size": 32, "stroke": "#4a4a4a", "grid": { "show": false },
+            { "side": 2, "size": 40, "stroke": "#8a8a8a", "grid": { "show": true, "stroke": "#1c1c1c" },
               "ticks": { "size": 80 }, "font": "11px 'IBM Plex Mono', monospace",
               "values": "__ephorix_time__" },
             { "side": 3, "size": 46, "stroke": "#e53935", "grid": { "show": true, "stroke": "#141414" },
@@ -616,7 +703,7 @@ fn build_battery_opts(width: i32) -> serde_json::Value {
             "y2": { "range": [0, 300] }
         },
         "axes": [
-            { "side": 2, "size": 32, "stroke": "#4a4a4a", "grid": { "show": false },
+            { "side": 2, "size": 40, "stroke": "#8a8a8a", "grid": { "show": true, "stroke": "#1c1c1c" },
               "ticks": { "size": 80 }, "font": "11px 'IBM Plex Mono', monospace",
               "values": "__ephorix_time__" },
             { "side": 3, "size": 46, "stroke": "#90a4ae", "grid": { "show": true, "stroke": "#141414" },

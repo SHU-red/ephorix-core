@@ -431,8 +431,9 @@ select { min-width: 120px; }
 .selection-readout { align-self: center; min-width: 240px; }
 
 /* Chart toolbar: the ZOOM/SELECT mode toggle sits top-left above the chart;
-   the select-mode action cluster (create / close / type / readout) follows it
-   in the same row and only appears while SELECT mode is active. */
+   the select-mode action cluster follows it in the same row and only appears
+   while SELECT mode is active — a single bordered box that shows contextual
+   actions for the current interaction (range vs point), never loose buttons. */
 .chart-toolbar {
   display: flex;
   gap: 12px;
@@ -456,11 +457,35 @@ select { min-width: 120px; }
 }
 .mode-toggle button:hover:not(.on) { color: var(--red); }
 .mode-toggle button.on { background: var(--red); color: #000; }
+/* One grouped control: dark bordered box holding the select-mode actions
+   (AGOGE FROM SELECTION for a range, AGOGE START/END for a point). */
+.select-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #0a0a0a;
+  border: 1px solid var(--line-strong, #2a2a2a);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
 .select-actions {
   display: flex;
   gap: 10px;
   align-items: flex-end;
   flex-wrap: wrap;
+}
+
+/* Agoge type chooser for the select-mode actions, below the diagrams. */
+.agoge-type-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.agoge-type-label {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.18em;
 }
 
 /* Persistent selection band: mirrors the SELECT drag range across the main
@@ -475,7 +500,21 @@ select { min-width: 120px; }
   pointer-events: none;
   z-index: 15;
 }
+/* Point cursor: a thin red line at a clicked instant across the main chart,
+   workout strip, and battery chart. Positioned in JS like .sel-band; width
+   and full-height are fixed here (JS overrides top/height per container). */
+.cursor-marker {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  width: 2px;
+  display: none;
+  background: var(--red-bright);
+  pointer-events: none;
+  z-index: 15;
+}
 .cursor-readout { align-self: center; }
+.point-readout { align-self: center; min-width: 240px; }
 
 /* ---------------- Lists ---------------- */
 
@@ -818,6 +857,7 @@ html, body { overflow-x: hidden; }
   .workout-gutter, .workout-gutter-right { display: none; }
   /* Chart toolbar wraps; the select-mode cluster stacks under the toggle. */
   .chart-toolbar { align-items: stretch; }
+  .select-box { width: 100%; }
   .select-actions { width: 100%; }
 
   /* The Gymnasia KPI strip hard-codes repeat(6, 1fr) inline, which wins over
