@@ -150,9 +150,10 @@ pub async fn chat(
     }
 
     let provider = load_provider(&pool, user.0).await?;
+    let settings = load_settings(&pool, user.0).await?;
 
     let mut messages: Vec<Value> = Vec::with_capacity(req.messages.len() + 1);
-    messages.push(json!({ "role": "system", "content": system_prompt(&req.context) }));
+    messages.push(json!({ "role": "system", "content": build_system_prompt(&req.context, &settings) }));
     for m in &req.messages {
         messages.push(json!({ "role": m.role, "content": m.content }));
     }
@@ -161,10 +162,7 @@ pub async fn chat(
 
     let (reply, block) = extract_pythia_block(&content);
     let proposals = match block.as_deref() {
-        Some(inner) => {
-            let settings = load_settings(&pool, user.0).await?;
-            validate_proposals(inner, &settings, &pool, user.0).await?
-        }
+        Some(inner) => validate_proposals(inner, &settings, &pool, user.0).await?,
         None => Vec::new(),
     };
 
@@ -367,6 +365,28 @@ fn system_prompt(context: &Value) -> String {
          - Never invent keys outside the list; the backend drops unknown keys.\n",
         keys = PYTHIA_ALLOWED_KEYS.join(", "),
     )
+}
+
+/// Full system message: the built-in oracle prompt plus the user's own
+/// standing directives (settings.aiProvider.systemPrompt), appended as a
+/// higher-priority block so Pythia behaves the way the user wants. The custom
+/// text is user-edited in the web UI (Nomoi tab), never AI-proposed, and every
+/// save is audited in `ai_action_log` like any other settings change.
+fn build_system_prompt(context: &Value, settings: &Value) -> String {
+    let mut s = system_prompt(context);
+    if let Some(custom) = settings
+        .pointer("/aiProvider/systemPrompt")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        s.push_str(
+            "\n\nUSER DIRECTIVES (the user's own standing instructions — highest \
+             priority; obey them strictly):\n",
+        );
+        s.push_str(custom);
+    }
+    s
 }
 
 /// Splits a model reply into (visible text, settings block). Tolerates
@@ -683,6 +703,26 @@ fn extract_nutrition(content: &str) -> ApiResult<(String, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_system_prompt_appends_user_directives() {
+        let context = json!({ "rangeDays": 7 });
+        let plain = build_system_prompt(&context, &json!({}));
+        assert!(plain.contains("You are PYTHIA"));
+        assert!(!plain.contains("USER DIRECTIVES"));
+        let with_dirs = build_system_prompt(
+            &context,
+            &json!({ "aiProvider": { "systemPrompt": "  Answer in haiku.  " } }),
+        );
+        assert!(with_dirs.contains("USER DIRECTIVES"));
+        assert!(with_dirs.contains("Answer in haiku."));
+        // Whitespace-only or missing custom prompt -> built-in prompt only.
+        let blank = build_system_prompt(
+            &context,
+            &json!({ "aiProvider": { "systemPrompt": "   " } }),
+        );
+        assert_eq!(blank, plain);
+    }
 
     fn sample(key: &str) -> Value {
         match key {

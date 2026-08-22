@@ -44,6 +44,17 @@ fn fmt_built_at(iso: &str) -> String {
 /// Time-range presets for the timeline buttons (label, days).
 const RANGES: &[(i64, &str)] = &[(1, "1D"), (7, "1W"), (30, "1M"), (365, "1Y")];
 
+/// Starting point for the user's own PYTHIA directives
+/// (settings.aiProvider.systemPrompt, appended to every oracle prompt by the
+/// backend). Editable in the Nomoi tab; RESET TO DEFAULT restores this text.
+const DEFAULT_SYSTEM_PROMPT: &str =
+    "You are the oracle of EphoriX speaking to a Spartan warrior. Answer in the app's voice: \
+     short, direct, decisive — no filler, no flattery. Use metric units (kg, km, kcal, hours, %). \
+     Never ask clarifying questions: if a detail is missing, choose a sensible default and state \
+     it in one line. Always give concrete [PYTHIA] values — no ranges, no conditionals. When the \
+     user describes a meal, estimate its calories and macros yourself. Keep replies under 120 \
+     words unless detail is requested.";
+
 /// Which bound of the selected session the chart-click picker is writing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PickField {
@@ -590,6 +601,7 @@ pub fn App() -> impl IntoView {
     let (ai_base, set_ai_base) = create_signal(String::new());
     let (ai_model, set_ai_model) = create_signal(String::new());
     let (ai_key, set_ai_key) = create_signal(String::new());
+    let (ai_sys_prompt, set_ai_sys_prompt) = create_signal(String::new());
     let (body_energy, set_body_energy) = create_signal(None::<BodyEnergyDay>);
     let (battery_series, set_battery_series) = create_signal(Vec::<BatterySeriesPoint>::new());
     let (readiness, set_readiness) = create_signal(None::<Vec<ReadinessDay>>);
@@ -678,7 +690,7 @@ pub fn App() -> impl IntoView {
         let token = token.get();
         let s = series.get();
         let d = days.get();
-        let ai = json!({ "provider": ai_provider.get(), "baseUrl": ai_base.get(), "model": ai_model.get(), "apiKey": ai_key.get() });
+        let ai = json!({ "provider": ai_provider.get(), "baseUrl": ai_base.get(), "model": ai_model.get(), "apiKey": ai_key.get(), "systemPrompt": ai_sys_prompt.get() });
         let targets = json!({
             "steps": target_steps.get(),
             "kcal": target_kcal.get(),
@@ -786,6 +798,7 @@ pub fn App() -> impl IntoView {
                         set_ai_base.set(ai.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("").to_string());
                         set_ai_model.set(ai.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string());
                         set_ai_key.set(ai.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").to_string());
+                        set_ai_sys_prompt.set(ai.get("systemPrompt").and_then(|v| v.as_str()).unwrap_or("").to_string());
                     }
                     if let Some(t) = sv.get("targets") {
                         set_target_steps.set(t.get("steps").and_then(|v| v.as_i64()).unwrap_or(10_000));
@@ -1931,7 +1944,7 @@ pub fn App() -> impl IntoView {
         let base = base.get();
         let token = token.get();
         spawn_local(async move {
-            let mut ai = json!({ "provider": provider, "baseUrl": b_url, "model": model });
+            let mut ai = json!({ "provider": provider, "baseUrl": b_url, "model": model, "systemPrompt": ai_sys_prompt.get() });
             if !key.trim().is_empty() {
                 ai["apiKey"] = json!(key.trim());
             }
@@ -1949,6 +1962,8 @@ pub fn App() -> impl IntoView {
             }
         });
     };
+
+    let reset_ai_sys_prompt = move |_| set_ai_sys_prompt.set(DEFAULT_SYSTEM_PROMPT.to_string());
 
     // -----------------------------------------------------------------------
     view! {
@@ -2355,7 +2370,7 @@ pub fn App() -> impl IntoView {
                                         }
                                     }}
                                 </div>
-                                <button class="btn small pythia-btn" on:click=oracle_ask_goals>"PYTHIA — SET GOALS"</button>
+                                <button class="btn small pythia-btn" on:click=oracle_ask_goals><span class="pythia-btn-glyph" inner_html=LAMBDA></span>"PYTHIA — SET GOALS"</button>
                             </div>
 
                             <hr class="hairline" />
@@ -2363,19 +2378,19 @@ pub fn App() -> impl IntoView {
                             <div class="goal-section">
                                 <div class="section-head">
                                     <h3 class="section-h3">"MEASUREMENTS"</h3>
-                                    <button class="btn small pythia-btn" on:click=oracle_ask_measure>"PYTHIA — LOG VIA AI"</button>
+                                    <button class="btn small pythia-btn" on:click=oracle_ask_measure><span class="pythia-btn-glyph" inner_html=LAMBDA></span>"PYTHIA — LOG VIA AI"</button>
                                 </div>
                                 <div class="settings-grid">
                                     <label class="ctl">"WEIGHT (KG)"
                                         <input prop:value=meas_weight on:input=move |ev| set_meas_weight.set(event_target_value(&ev)) placeholder="82.5" />
                                     </label>
                                     <button class="btn" on:click=move |_| log_measurement("weight_kg")>"LOG WEIGHT"</button>
-                                    <button class="btn small pythia-btn" on:click=oracle_ask_weight>"PYTHIA"</button>
+                                    <button class="btn small pythia-btn" on:click=oracle_ask_weight><span class="pythia-btn-glyph" inner_html=LAMBDA></span>"PYTHIA"</button>
                                     <label class="ctl">"BODY FAT (%)"
                                         <input prop:value=meas_body_fat on:input=move |ev| set_meas_body_fat.set(event_target_value(&ev)) placeholder="15.0" />
                                     </label>
                                     <button class="btn" on:click=move |_| log_measurement("body_fat_pct")>"LOG BODY FAT"</button>
-                                    <button class="btn small pythia-btn" on:click=oracle_ask_body_fat>"PYTHIA"</button>
+                                    <button class="btn small pythia-btn" on:click=oracle_ask_body_fat><span class="pythia-btn-glyph" inner_html=LAMBDA></span>"PYTHIA"</button>
                                 </div>
                                 <p class="muted" style="margin:10px 0 6px">"latest first · every log also lands in the SKOPOS action log"</p>
                                 <ul class="list measure-list">
@@ -2484,7 +2499,7 @@ pub fn App() -> impl IntoView {
                         <section class="panel">
                             <div class="panel-head">
                                 <h2>"LOG FOOD / WATER"</h2>
-                                <button class="btn small pythia-btn" on:click=oracle_ask_nutrition>"PYTHIA — LOG A MEAL"</button>
+                                <button class="btn small pythia-btn" on:click=oracle_ask_nutrition><span class="pythia-btn-glyph" inner_html=LAMBDA></span>"PYTHIA — LOG A MEAL"</button>
                             </div>
                             <div class="settings-grid">
                                 <label class="ctl">"KIND"
@@ -2755,8 +2770,23 @@ pub fn App() -> impl IntoView {
                         </section>
                         <section class="panel">
                             <div class="panel-head">
+                                <h2>"TIMELINE"</h2>
+                                <span class="muted">"the default range the diagrams open with"</span>
+                            </div>
+                            <div class="range-buttons">
+                                {RANGES.iter().map(|(d, label)| {
+                                    let d = *d;
+                                    view! {
+                                        <button class="pill" class:on=move || days.get() == d on:click=move |_| set_range_days(d)>{*label}</button>
+                                    }
+                                }).collect_view()}
+                                <span class="muted">"selecting here also switches the current diagrams"</span>
+                            </div>
+                        </section>
+                        <section class="panel">
+                            <div class="panel-head">
                                 <h2>"PYTHIA — AI PROVIDER"</h2>
-                                <button class="btn small pythia-btn" on:click=oracle_ask_ai_config>"PYTHIA — CONFIG HELP"</button>
+                                <button class="btn small pythia-btn" on:click=oracle_ask_ai_config><span class="pythia-btn-glyph" inner_html=LAMBDA></span>"PYTHIA — CONFIG HELP"</button>
                             </div>
                             <details class="advanced">
                                 <summary>"PROVIDER CONFIGURATION (ADVANCED)"</summary>
@@ -2793,6 +2823,17 @@ pub fn App() -> impl IntoView {
                                     }
                                 }}
                             </details>
+                            <div class="sys-prompt-block">
+                                <label class="ctl">"SYSTEM PROMPT — PYTHIA BEHAVIOUR DIRECTIVES"
+                                    <textarea rows="7" prop:value=ai_sys_prompt on:input=move |ev| set_ai_sys_prompt.set(event_target_value(&ev)) spellcheck="false" placeholder="(empty = built-in oracle directives only)"></textarea>
+                                </label>
+                                <p class="muted">"Appended to every PYTHIA prompt so the oracle behaves the way you want. Every save is written to the SKOPOS action log and can be reverted there."</p>
+                                <div class="ai-provider-actions">
+                                    <button class="btn small" on:click=reset_ai_sys_prompt>"RESET TO DEFAULT"</button>
+                                    <button class="btn small" on:click=save_ai_provider>"SAVE"</button>
+                                    <span class="muted">{move || format!("{} / 4000 chars", ai_sys_prompt.get().chars().count())}</span>
+                                </div>
+                            </div>
                         </section>
                         <section class="panel import-panel">
                             <div class="panel-head"><h2>"IMPORT DATA"</h2><span class="muted">{move || import_name.get()}</span></div>
