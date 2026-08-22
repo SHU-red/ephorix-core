@@ -76,18 +76,48 @@ pub async fn get_timeline(
     // Contiguous buckets: `generate_series` emits every bucket in [from, to)
     // and LEFT JOIN keeps empty ones (null HR, zeroed counters) so gaps render
     // as honest breaks instead of lines spanning missing data.
+    //
+    // steps/active_calories on the watch are CUMULATIVE day totals
+    // (`health_service_sum(metric, today, now)` per sample), so summing the
+    // rows per bucket would double-count. Convert each row to the delta
+    // accrued since the previous sample (first-of-day: since midnight) and
+    // spread that delta evenly over its interval — a row at t with delta d
+    // covers [prev_t, t), a first-of-day row covers [midnight, t). The query
+    // pulls one extra day before `from` so the first in-window row's delta is
+    // computed against its true predecessor.
     let points: Vec<TimelinePoint> = sqlx::query_as(
-        "SELECT
+        "WITH raw AS (
+            SELECT timestamp, heart_rate,
+                   GREATEST(steps - COALESCE(LAG(steps) OVER (PARTITION BY d ORDER BY timestamp), 0), 0)::bigint AS step_delta,
+                   GREATEST(active_calories - COALESCE(LAG(active_calories) OVER (PARTITION BY d ORDER BY timestamp), 0.0), 0.0)::float8 AS kcal_delta,
+                   COALESCE(LAG(timestamp) OVER (PARTITION BY d ORDER BY timestamp), d) AS lo,
+                   d
+            FROM (SELECT *, date_trunc('day', timestamp) AS d FROM raw_health_data
+                  WHERE user_id = $2
+                    AND timestamp >= $3 - interval '1 day'
+                    AND timestamp <  $4) r
+         ),
+         spread AS (
+            SELECT gs.b,
+                   COALESCE(SUM(r.step_delta * GREATEST(EXTRACT(EPOCH FROM (LEAST(gs.b + $1::interval, r.timestamp) - GREATEST(gs.b, r.lo))), 0)
+                       / GREATEST(EXTRACT(EPOCH FROM (r.timestamp - r.lo)), 1)), 0)::bigint AS steps,
+                   COALESCE(SUM(r.kcal_delta * GREATEST(EXTRACT(EPOCH FROM (LEAST(gs.b + $1::interval, r.timestamp) - GREATEST(gs.b, r.lo))), 0)
+                       / GREATEST(EXTRACT(EPOCH FROM (r.timestamp - r.lo)), 1)), 0)::float8 AS active_calories
+            FROM generate_series($3, $4 - $1::interval, $1::interval) AS gs(b)
+            LEFT JOIN raw r ON gs.b < r.timestamp AND gs.b + $1::interval > r.lo
+            GROUP BY gs.b
+         )
+         SELECT
             (EXTRACT(EPOCH FROM gs.b) * 1000)::float8 AS ts,
             AVG(r.heart_rate)::float8 AS heart_rate,
-            COALESCE(SUM(r.steps), 0)::bigint AS steps,
-            COALESCE(SUM(r.active_calories), 0)::float8 AS active_calories
+            sp.steps,
+            sp.active_calories
          FROM generate_series($3, $4 - $1::interval, $1::interval) AS gs(b)
-         LEFT JOIN raw_health_data r
-           ON r.user_id = $2
-           AND r.timestamp >= gs.b
+         LEFT JOIN raw r
+           ON r.timestamp >= gs.b
            AND r.timestamp < gs.b + $1::interval
-         GROUP BY gs.b
+         LEFT JOIN spread sp ON sp.b = gs.b
+         GROUP BY gs.b, sp.steps, sp.active_calories
          ORDER BY gs.b",
     )
     .bind(&bucket)
