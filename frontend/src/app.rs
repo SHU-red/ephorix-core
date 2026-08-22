@@ -394,6 +394,9 @@ fn TabHero(tab: Tab) -> impl IntoView {
         Tab::Syntaxis => Some(("/assets/dict_syntaxis.png", "Syntaxis")),
         Tab::Syssitia => Some(("/assets/dict_syssitia.png", "Syssitia")),
         Tab::Leonidas => Some(("/assets/dict_leonidas.png", "Leonidas")),
+        Tab::Nomoi => Some(("/assets/dict_nomoi.png", "Nomoi")),
+        Tab::Rank => Some(("/assets/dict_rank.png", "Rank")),
+        Tab::Skopos => Some(("/assets/dict_skopos.png", "Skopos")),
         _ => None,
     };
     view! {
