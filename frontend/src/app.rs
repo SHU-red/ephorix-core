@@ -41,6 +41,19 @@ fn fmt_built_at(iso: &str) -> String {
     }
 }
 
+/// Unified-log timestamp: time-only ("HH:MM") for entries younger than 24 h,
+/// date + time ("YYYY-MM-DD HH:MM") for older ones so the list stays scannable.
+fn fmt_log_ts(ts: f64) -> String {
+    let iso = iso_from_ms(ts);
+    if ts > 0.0 && js_sys::Date::now() - ts < 86_400_000.0 && iso.len() >= 16 {
+        iso[11..16].to_string()
+    } else if iso.len() >= 16 {
+        format!("{} {}", &iso[..10], &iso[11..16])
+    } else {
+        iso
+    }
+}
+
 /// Time-range presets for the timeline buttons (label, days).
 const RANGES: &[(i64, &str)] = &[(1, "1D"), (7, "1W"), (30, "1M"), (365, "1Y")];
 
@@ -68,6 +81,69 @@ struct LogEntry {
     ts: f64,
     kind: &'static str,
     msg: String,
+}
+
+/// One row of the unified Skopos log window: either a local event-feed entry
+/// (`is_action == false`) or a persisted server action (revertible via REVERT).
+#[derive(Clone)]
+struct UnifiedLogRow {
+    /// Stable identity across both sources ("a-<id>" actions, "l-<id>" events).
+    key: String,
+    ts: f64,
+    kind: String,
+    /// Message (events) or target (actions; falls back to the kind).
+    text: String,
+    /// Pre-formatted fallback timestamp when `ts` could not be parsed.
+    ts_text: Option<String>,
+    is_action: bool,
+    action_id: Option<String>,
+    reverted: bool,
+}
+
+/// Classifications surfaced in the unified log filter: the local event kinds
+/// plus the persisted action kinds. Each maps to a `.log-kind--<kind>` accent.
+const LOG_KINDS: [&str; 10] = [
+    "ui", "api", "settings", "ai", "agoge", "detection",
+    "nutrition", "measurement", "import", "action",
+];
+
+/// Merges the in-memory event feed and the persisted server action log into a
+/// single newest-first list of unified log rows.
+fn unified_log_rows(events: Vec<LogEntry>, actions: Vec<ActionLogEntry>) -> Vec<UnifiedLogRow> {
+    let mut rows = Vec::with_capacity(events.len() + actions.len());
+    for a in actions {
+        let (ts, ts_text) = match ms_from_iso(&a.created_at) {
+            Some(t) => (t, None),
+            None => (0.0, Some(a.created_at.chars().take(16).collect())),
+        };
+        let text = if a.target.is_empty() { a.kind.clone() } else { a.target.clone() };
+        rows.push(UnifiedLogRow {
+            // Revert state is part of the key so the keyed <For> re-renders
+            // the row (REVERT -> REVERTED) after a successful revert.
+            key: format!("a-{}-{}", a.id, a.reverted_at.is_some()),
+            ts,
+            kind: a.kind.clone(),
+            text,
+            ts_text,
+            is_action: true,
+            action_id: Some(a.id),
+            reverted: a.reverted_at.is_some(),
+        });
+    }
+    for e in events {
+        rows.push(UnifiedLogRow {
+            key: format!("l-{}", e.id),
+            ts: e.ts,
+            kind: e.kind.to_string(),
+            text: e.msg,
+            ts_text: None,
+            is_action: false,
+            action_id: None,
+            reverted: false,
+        });
+    }
+    rows.sort_by(|x, y| y.ts.partial_cmp(&x.ts).unwrap_or(std::cmp::Ordering::Equal));
+    rows
 }
 
 // --- Pythia oracle (AI chat panel) -----------------------------------------
@@ -613,6 +689,11 @@ pub fn App() -> impl IntoView {
     // Persisted action log (Skopos): server-logged settings/nutrition/measurement
     // actions with REVERT — distinct from the in-memory event feed above.
     let (actions, set_actions) = create_signal(Vec::<ActionLogEntry>::new());
+    // Unified Skopos log window filters: hidden classifications (empty = all
+    // shown), time-range preset, and free-text search.
+    let (log_hidden_kinds, set_log_hidden_kinds) = create_signal(Vec::<String>::new());
+    let (log_range, set_log_range) = create_signal("all".to_string());
+    let (log_search, set_log_search) = create_signal(String::new());
     let log_event = move |kind: &'static str, msg: &str| {
         let id = log_counter.get();
         log_counter.set(id + 1);
@@ -675,6 +756,12 @@ pub fn App() -> impl IntoView {
     let (oracle_proposals, set_oracle_proposals) = create_signal(Vec::<OracleProposalRow>::new());
     let oracle_msg_seq = create_rw_signal(0u64);
     let oracle_thread_ref: NodeRef<leptos::html::Div> = create_node_ref();
+    // Pythia panel size, driven by the custom top-left resize grip
+    // (oracle_resize_* handlers below); CSS min/max clamp the result.
+    let (oracle_w, set_oracle_w) = create_signal(560u32);
+    let (oracle_h, set_oracle_h) = create_signal(560u32);
+    let oracle_resize_ref: NodeRef<leptos::html::Div> = create_node_ref();
+    let oracle_resize_start = create_rw_signal(None::<(f64, f64, u32, u32)>);
     // AI provider config (persisted as settings.aiProvider).
     let (ai_provider, set_ai_provider) = create_signal("llamacpp".to_string());
     let (ai_testing, set_ai_testing) = create_signal(false);
@@ -978,13 +1065,26 @@ pub fn App() -> impl IntoView {
         persist_settings();
     };
 
+    // Single deletion path for every UI location (sessions panel row,
+    // SessionDetails, chip / chart-slot detail). The shared `sessions`
+    // signal is the single source of truth: drop the row immediately so the
+    // bottom chips, the sessions panel, and the chart workout strip all
+    // re-render in the same tick, then refresh() resyncs the timeline from
+    // the server (and restores the row on failure).
     let delete_session = move |id: String| {
+        set_sessions.update(|ss| ss.retain(|s| s.id != id));
+        if selected_session.get().map(|s| s.id) == Some(id.clone()) {
+            selected_session.set(None);
+        }
         let base = base.get();
         let token = token.get();
         spawn_local(async move {
             match delete_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}")).await {
                 Ok(_) => refresh(),
-                Err(e) => set_error.set(Some(e)),
+                Err(e) => {
+                    refresh();
+                    set_error.set(Some(e));
+                }
             }
         });
     };
@@ -1414,6 +1514,30 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // Unified Skopos log window: merge the local event feed and the persisted
+    // action log (newest first) and apply the active filters — classification
+    // toggles, time range, and case-insensitive text search.
+    let visible_log_rows = move || {
+        let rows = unified_log_rows(log.get(), actions.get());
+        let hidden = log_hidden_kinds.get();
+        let range = log_range.get();
+        let q = log_search.get().to_lowercase();
+        let now = js_sys::Date::now();
+        let cutoff = match range.as_str() {
+            "1h" => now - 3_600_000.0,
+            "24h" => now - 86_400_000.0,
+            "7d" => now - 7.0 * 86_400_000.0,
+            _ => f64::NEG_INFINITY,
+        };
+        rows.into_iter()
+            .filter(|r| {
+                r.ts >= cutoff
+                    && (hidden.is_empty() || !hidden.iter().any(|h| h == &r.kind))
+                    && (q.is_empty() || r.text.to_lowercase().contains(&q))
+            })
+            .collect::<Vec<_>>()
+    };
+
     // LOG button for the MEASUREMENTS section: POST then refresh the list.
     let log_measurement = move |metric: &'static str| {
         let val: f64 = if metric == "weight_kg" {
@@ -1660,6 +1784,40 @@ pub fn App() -> impl IntoView {
             set_oracle_error.set(None);
         }
         set_oracle_open.set(open);
+    };
+
+    // Custom top-left resize grip for the oracle panel: pointer capture keeps
+    // the move/up events flowing to the grip while dragging; NW drag grows the
+    // panel (it is anchored bottom-right). Clamped to 320px..viewport.
+    let oracle_resize_down = move |ev: web_sys::PointerEvent| {
+        if let Some(el) = oracle_resize_ref.get() {
+            let _ = el.set_pointer_capture(ev.pointer_id());
+        }
+        ev.prevent_default();
+        oracle_resize_start.set(Some((
+            ev.client_x() as f64,
+            ev.client_y() as f64,
+            oracle_w.get(),
+            oracle_h.get(),
+        )));
+    };
+    let oracle_resize_move = move |ev: web_sys::PointerEvent| {
+        if let Some((sx, sy, sw, sh)) = oracle_resize_start.get() {
+            let vw = window().inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let vh = window().inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let max_w = (vw * 0.92).max(320.0);
+            let max_h = (vh * 0.70).max(320.0);
+            let w = (sw as f64 - (ev.client_x() as f64 - sx)).clamp(320.0, max_w);
+            let h = (sh as f64 - (ev.client_y() as f64 - sy)).clamp(320.0, max_h);
+            set_oracle_w.set(w.round() as u32);
+            set_oracle_h.set(h.round() as u32);
+        }
+    };
+    let oracle_resize_up = move |ev: web_sys::PointerEvent| {
+        oracle_resize_start.set(None);
+        if let Some(el) = oracle_resize_ref.get() {
+            let _ = el.release_pointer_capture(ev.pointer_id());
+        }
     };
 
     // Send one chat turn (also called from the input's Enter key).
@@ -2906,49 +3064,89 @@ pub fn App() -> impl IntoView {
                         <TabHero tab=Tab::Skopos />
                         <section class="panel">
                             <div class="panel-head">
-                                <h2>"ACTION LOG"</h2>
-                                <span class="muted">{move || format!("{} actions", actions.get().len())}</span>
+                                <h2>"SKOPOS — LOG"</h2>
+                                <span class="muted">{move || format!("{} shown", visible_log_rows().len())}</span>
                             </div>
-                            <ul class="list action-list">
-                                <For each=move || actions.get() key=|a| format!("{}-{}", a.id, a.reverted_at.is_some()) let:a>
-                                    {move || {
-                                        let id = a.id.clone();
-                                        let reverted = a.reverted_at.is_some();
-                                        let time = ms_from_iso(&a.created_at).map(fmt_time).unwrap_or_else(|| a.created_at.chars().take(16).collect());
-                                        let target = if a.target.is_empty() { a.kind.clone() } else { a.target.clone() };
-                                        view! {
-                                            <li class="row action-row">
-                                                <span class="action-kind">{a.kind.to_uppercase()}</span>
-                                                <span class="action-target">{target}</span>
-                                                <span class="row-time">{time}</span>
-                                                {if reverted {
-                                                    view! { <span class="action-reverted">"REVERTED"</span> }.into_view()
-                                                } else {
-                                                    view! { <button class="btn small" on:click=move |_| revert_action_fn(id.clone())>"REVERT"</button> }.into_view()
-                                                }}
-                                            </li>
-                                        }
-                                    }}
-                                </For>
-                            </ul>
-                            <Show when=move || actions.get().is_empty() fallback=|| ()>
-                                <p class="muted">"No persisted actions yet — settings saves, nutrition, and measurements are recorded here and can be reverted."</p>
+                            <div class="log-filters">
+                                <div class="log-filter-row">
+                                    <span class="log-filter-label">"CLASS"</span>
+                                    <div class="cat-switch log-kind-switch">
+                                        {LOG_KINDS.iter().map(|k| {
+                                            let k = *k;
+                                            view! {
+                                                <button
+                                                    class="log-kind-btn"
+                                                    class:on=move || !log_hidden_kinds.get().iter().any(|h| h.as_str() == k)
+                                                    on:click=move |_| set_log_hidden_kinds.update(|v| {
+                                                        if let Some(pos) = v.iter().position(|h| h.as_str() == k) {
+                                                            v.remove(pos);
+                                                        } else {
+                                                            v.push(k.to_string());
+                                                        }
+                                                    })
+                                                >{k.to_uppercase()}</button>
+                                            }
+                                        }).collect_view()}
+                                    </div>
+                                </div>
+                                <div class="log-filter-row">
+                                    <span class="log-filter-label">"SINCE"</span>
+                                    <select class="log-filter-select" prop:value=move || log_range.get() on:change=move |ev| set_log_range.set(event_target_value(&ev))>
+                                        <option value="all">"ALL"</option>
+                                        <option value="1h">"LAST HOUR"</option>
+                                        <option value="24h">"LAST 24 HOURS"</option>
+                                        <option value="7d">"LAST 7 DAYS"</option>
+                                    </select>
+                                </div>
+                                <div class="log-filter-row">
+                                    <span class="log-filter-label">"SEARCH"</span>
+                                    <input class="log-filter-input" type="text" placeholder="match message / target…" prop:value=move || log_search.get() on:input=move |ev| set_log_search.set(event_target_value(&ev)) />
+                                </div>
+                            </div>
+                            <Show when=move || !visible_log_rows().is_empty() fallback=|| ()>
+                                <ul class="list log-list">
+                                    <For each=move || visible_log_rows() key=|r| r.key.clone() let:r>
+                                        {move || {
+                                            let ts_text = r.ts_text.clone().unwrap_or_else(|| fmt_log_ts(r.ts));
+                                            if r.is_action {
+                                                let id = r.action_id.clone().unwrap_or_default();
+                                                let reverted = r.reverted;
+                                                view! {
+                                                    <li class="row log-row">
+                                                        <span class={format!("log-kind log-kind--{}", r.kind)}>{r.kind.to_uppercase()}</span>
+                                                        <span class="log-msg">{r.text.clone()}</span>
+                                                        <span class="row-time">{ts_text}</span>
+                                                        {if reverted {
+                                                            view! { <span class="log-reverted">"REVERTED"</span> }.into_view()
+                                                        } else {
+                                                            view! { <button class="btn small" on:click=move |_| revert_action_fn(id.clone())>"REVERT"</button> }.into_view()
+                                                        }}
+                                                    </li>
+                                                }
+                                            } else {
+                                                view! {
+                                                    <li class="row log-row">
+                                                        <span class={format!("log-kind log-kind--{}", r.kind)}>{r.kind.to_uppercase()}</span>
+                                                        <span class="log-msg">{r.text.clone()}</span>
+                                                        <span class="row-time">{ts_text}</span>
+                                                    </li>
+                                                }
+                                            }
+                                        }}
+                                    </For>
+                                </ul>
                             </Show>
-                        </section>
-                        <section class="panel">
-                            <div class="panel-head">
-                                <h2>"SKOPOS — ACTIVITY LOG"</h2>
-                                <span class="muted">{move || format!("{} events", log.get().len())}</span>
-                            </div>
-                            <ul class="list log-list">
-                                <For each=move || log.get() key=|e| e.id let:e>
-                                    <li class="row log-row">
-                                        <span class="log-kind">{e.kind.to_uppercase()}</span>
-                                        <span class="log-msg">{e.msg.clone()}</span>
-                                        <span class="row-time">{fmt_time(e.ts)}</span>
-                                    </li>
-                                </For>
-                            </ul>
+                            {move || {
+                                if visible_log_rows().is_empty() {
+                                    if unified_log_rows(log.get(), actions.get()).is_empty() {
+                                        view! { <p class="muted">"No activity yet — UI, API, settings, nutrition, measurement, and import events are recorded here; persisted server actions can be reverted."</p> }.into_view()
+                                    } else {
+                                        view! { <p class="muted">"No entries match the current filters."</p> }.into_view()
+                                    }
+                                } else {
+                                    view! {}.into_view()
+                                }
+                            }}
                         </section>
                     }.into_view(),
                 }
@@ -2966,11 +3164,17 @@ pub fn App() -> impl IntoView {
             </footer>
 
             <button class="oracle-fab" on:click=oracle_toggle title="Ask the Pythia oracle about your training">
-                <span class="oracle-fab-glyph" inner_html=glyph_svg("shield")></span>
+                <span class="oracle-fab-glyph" inner_html=LAMBDA></span>
                 <span>"PYTHIA"</span>
             </button>
             <Show when=move || oracle_open.get() fallback=|| ()>
-                <div class="oracle-panel">
+                <div class="oracle-panel" style=move || format!("width: {}px; height: {}px", oracle_w.get(), oracle_h.get())>
+                    <div class="oracle-resize" node_ref=oracle_resize_ref
+                        on:pointerdown=oracle_resize_down
+                        on:pointermove=oracle_resize_move
+                        on:pointerup=oracle_resize_up
+                        on:pointercancel=oracle_resize_up
+                        title="Drag to resize"></div>
                     <div class="oracle-head">
                         <span class="oracle-head-glyph" inner_html=glyph_svg("shield")></span>
                         <span class="oracle-title">"PYTHIA — ORACLE"</span>
@@ -3475,12 +3679,20 @@ fn SessionRow(
 ) -> impl IntoView {
     let id = session.id.clone();
     let status = session.status.clone();
-    let (name, color) = session
+    // Name/color: resolved type when known; otherwise the raw type id (muted)
+    // as a fallback, or "Undefined" for an untyped session.
+    let (name, color, undefined) = match session
         .type_id
         .as_ref()
         .and_then(|tid| types.get().into_iter().find(|t| &t.id == tid))
-        .map(|t| (t.name.clone(), t.color_code.clone()))
-        .unwrap_or_else(|| ("Undefined".to_string(), "#7B0000".to_string()));
+    {
+        Some(t) => (t.name.clone(), t.color_code.clone(), false),
+        None => (
+            session.type_id.clone().unwrap_or_else(|| "Undefined".to_string()),
+            "#7B0000".to_string(),
+            true,
+        ),
+    };
     let time_text = {
         let start = ms_from_iso(&session.start_time)
             .map(fmt_time)
@@ -3490,16 +3702,18 @@ fn SessionRow(
                 let end = ms_from_iso(e).map(fmt_time).unwrap_or_else(|| e.clone());
                 format!("{start} → {end}")
             }
-            None => start,
+            None => format!("{start} · {}m", elapsed_minutes_since(&session.start_time)),
         }
     };
+    let hr = session.avg_hr.map(|v| format!("{v} BPM"));
     view! {
         <li class={if status == "active" { "row open" } else { "row" }}>
             <span class="dot" style=format!("background:{color}")></span>
-            <span class="row-name">
+            <span class="row-name" style={if undefined { "color:var(--muted)".to_string() } else { String::new() }}>
                 {format!("{} · {}", name, if status == "active" { "OPEN" } else { "CLOSED" })}
             </span>
             <span class="row-time">{time_text}</span>
+            {hr.map(|h| view! { <span class="row-time">{h}</span> })}
             <button class="btn small" on:click=move |_| on_delete.call(id.clone())>
                 "DELETE"
             </button>
@@ -3707,6 +3921,50 @@ fn hms(total: i64) -> String {
     format!("{}:{:02}:{:02}", total / 3600, (total % 3600) / 60, total % 60)
 }
 
+/// SVG polyline "x,y" points for the session pulse sparkline (1000×120
+/// viewBox, non-scaling stroke). Samples map to even horizontal spacing
+/// across the window; a single-point series renders on the center line.
+fn pulse_polyline(points: &[i64]) -> String {
+    if points.is_empty() {
+        return String::new();
+    }
+    let (lo, hi) = points
+        .iter()
+        .fold((i64::MAX, i64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let span = (hi - lo).max(1) as f64;
+    let w = 1000.0f64;
+    let h = 120.0f64;
+    let n = points.len();
+    let mut s = String::new();
+    for (i, &v) in points.iter().enumerate() {
+        if i > 0 {
+            s.push(' ');
+        }
+        let x = if n == 1 { w / 2.0 } else { i as f64 / (n - 1) as f64 * w };
+        let y = h - 4.0 - (v as f64 - lo as f64) / span * (h - 8.0);
+        s.push_str(&format!("{x:.1},{y:.1}"));
+    }
+    s
+}
+
+/// "HH:MM" from an ISO timestamp, for the compact session cards (chips/rows).
+fn hhmm_from_iso(s: &str) -> String {
+    ms_from_iso(s)
+        .map(|ms| {
+            let iso = iso_from_ms(ms);
+            if iso.len() >= 16 { iso[11..16].to_string() } else { iso }
+        })
+        .unwrap_or_default()
+}
+
+/// Elapsed whole minutes between an ISO start time and now — the card
+/// "duration" for an open session (no end time yet).
+fn elapsed_minutes_since(start_iso: &str) -> i64 {
+    ms_from_iso(start_iso)
+        .map(|st| ((js_sys::Date::now() - st) / 60_000.0).max(0.0) as i64)
+        .unwrap_or(0)
+}
+
 /// Parse an "HH:MM" duration (multi-digit hours ok) into whole seconds.
 fn parse_hhmm(s: &str) -> Option<i64> {
     let (h, m) = s.trim().split_once(':')?;
@@ -3718,8 +3976,10 @@ fn parse_hhmm(s: &str) -> Option<i64> {
     Some(h * 3600 + m * 60)
 }
 
-/// One session strip chip: colored dot + type name + HH:MM start time.
-/// Clicking it opens the session's details panel.
+/// One session strip chip: colored dot + type name + status (OPEN/CLOSED) +
+/// time range (or elapsed while open) + avg HR when the watch reported one.
+/// Clicking it opens the session's details panel. Unknown types fall back to
+/// the raw type id (muted) instead of "Undefined" alone.
 #[component]
 fn SessionChip(
     session: AgogeSession,
@@ -3733,7 +3993,16 @@ fn SessionChip(
             sid.as_ref()
                 .and_then(|tid| types.get().into_iter().find(|t| &t.id == tid))
                 .map(|t| t.name.clone())
+                .or_else(|| sid.clone())
                 .unwrap_or_else(|| "Undefined".to_string())
+        }
+    };
+    let undefined = {
+        let sid = sid.clone();
+        move || {
+            sid.as_ref()
+                .and_then(|tid| types.get().into_iter().find(|t| &t.id == tid))
+                .is_none()
         }
     };
     let color = {
@@ -3745,18 +4014,20 @@ fn SessionChip(
                 .unwrap_or_else(|| "#7B0000".to_string())
         }
     };
-    let hhmm = ms_from_iso(&session.start_time)
-        .map(|ms| {
-            let iso = iso_from_ms(ms);
-            if iso.len() >= 16 { iso[11..16].to_string() } else { iso }
-        })
-        .unwrap_or_default();
+    let status = if session.status == "active" { "OPEN" } else { "CLOSED" };
+    let time_text = match &session.end_time {
+        Some(e) => format!("{} → {}", hhmm_from_iso(&session.start_time), hhmm_from_iso(e)),
+        None => format!("{} · {}m", hhmm_from_iso(&session.start_time), elapsed_minutes_since(&session.start_time)),
+    };
+    let hr = session.avg_hr.map(|v| format!("{v} BPM"));
     let s = session.clone();
     view! {
         <button class="session-chip" on:click=move |_| on_open.call(s.clone())>
             <span class="dot" style=move || format!("background:{}", color())></span>
-            <span class="chip-name">{move || name()}</span>
-            <span class="chip-time">{hhmm}</span>
+            <span class="chip-name" style=move || if undefined() { "color:var(--muted)".to_string() } else { "".to_string() }>{move || name()}</span>
+            <span class="chip-time">{status}</span>
+            <span class="chip-time">{time_text}</span>
+            {hr.map(|h| view! { <span class="chip-time">{h}</span> })}
         </button>
     }
 }
@@ -3785,6 +4056,9 @@ fn SessionDetails(
     // reported them (None = "—").
     let summary_intensity = session.movement_intensity;
     let summary_distance = session.distance_m;
+    // Watch stop-summary avg HR (marker value on the session row): fallback
+    // for the AVG HR KPI when the stats payload has no computed pulse.
+    let summary_avg_hr = session.avg_hr;
     // Shared read handles so the per-row closures below can clone the
     // connection strings without moving them out of a multi-call Fn scope.
     let (base_r, _base_w) = create_signal(base.clone());
@@ -3792,7 +4066,8 @@ fn SessionDetails(
     let (sid_r, _sid_w) = create_signal(id.clone());
     let (type_id, set_type_id) = create_signal(session.type_id.clone().unwrap_or_default());
 
-    // Type name + swatch, kept live against the type dictionary.
+    // Type name + swatch, kept live against the type dictionary. Unknown
+    // type id falls back to the raw id; untyped sessions read "Undefined".
     let sid = session.type_id.clone();
     let name = {
         let sid = sid.clone();
@@ -3800,6 +4075,7 @@ fn SessionDetails(
             sid.as_ref()
                 .and_then(|tid| types.get().into_iter().find(|t| &t.id == tid))
                 .map(|t| t.name.clone())
+                .or_else(|| sid.clone())
                 .unwrap_or_else(|| "Undefined".to_string())
         }
     };
@@ -3946,6 +4222,39 @@ fn SessionDetails(
             <Show when=move || stats.get().is_some() fallback=|| ()>
                 {move || {
                     let st = stats.get().unwrap();
+                    // AVG HR: stats avgHr (marker avg → raw_health_data →
+                    // measurements rollup, computed server-side) when > 0,
+                    // else the session's own marker avgHr, else "—".
+                    let kpi_avg_hr = (st.avg_hr > 0.0)
+                        .then_some(st.avg_hr)
+                        .or_else(|| summary_avg_hr.filter(|v| *v > 0).map(|v| v as f64))
+                        .map(|v| format!("{v:.0}"))
+                        .unwrap_or_else(|| "—".to_string());
+                    let kpi_peak_hr = if st.peak_hr > 0 {
+                        st.peak_hr.to_string()
+                    } else {
+                        "—".to_string()
+                    };
+                    // Pulse strip: the raw_health_data series (≤120 points,
+                    // bucketed server-side) across the session window.
+                    let pulse_hrs = st.pulse.series.iter().map(|p| p.hr).collect::<Vec<_>>();
+                    let has_pulse = !pulse_hrs.is_empty();
+                    let polyline = pulse_polyline(&pulse_hrs);
+                    let pulse_min = st
+                        .pulse
+                        .min_hr
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "—".to_string());
+                    let pulse_avg = st
+                        .pulse
+                        .avg_hr
+                        .map(|v| format!("{v:.0}"))
+                        .unwrap_or_else(|| "—".to_string());
+                    let pulse_max = st
+                        .pulse
+                        .max_hr
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "—".to_string());
                     view! {
                         <div class="kpi" style="flex:1 1 460px; min-width:0;">
                             <div class="kpi-chip">
@@ -3970,11 +4279,11 @@ fn SessionDetails(
                             </div>
                             <div class="kpi-chip">
                                 <span class="kpi-label">"AVG HR"</span>
-                                <div class="kpi-value">{format!("{:.0}", st.avg_hr)}<span class="unit">"BPM"</span></div>
+                                <div class="kpi-value">{kpi_avg_hr}<span class="unit">"BPM"</span></div>
                             </div>
                             <div class="kpi-chip">
                                 <span class="kpi-label">"PEAK HR"</span>
-                                <div class="kpi-value">{format!("{}", st.peak_hr)}<span class="unit">"BPM"</span></div>
+                                <div class="kpi-value">{kpi_peak_hr}<span class="unit">"BPM"</span></div>
                             </div>
                             <div class="kpi-chip">
                                 <span class="kpi-label">"SETS"</span>
@@ -3988,6 +4297,22 @@ fn SessionDetails(
                                 <span class="kpi-label">"VOLUME"</span>
                                 <div class="kpi-value">{format!("{:.0}", st.volume_kg)}<span class="unit">"KG"</span></div>
                             </div>
+                        </div>
+                        <div style="flex:1 1 100%; margin-top:10px; border:1px solid var(--line); background:var(--panel-2); padding:10px 12px; min-width:0;">
+                            <Show when=move || has_pulse fallback=|| ()>
+                                <div style="display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom:6px; flex-wrap:wrap;">
+                                    <span class="kpi-label">"PULSE · SESSION WINDOW"</span>
+                                    <span class="muted" style="font-size:10px;">
+                                        {format!("MIN {pulse_min} · AVG {pulse_avg} · MAX {pulse_max} BPM")}
+                                    </span>
+                                </div>
+                                <svg viewBox="0 0 1000 120" preserveAspectRatio="none" style="width:100%; height:56px; display:block;">
+                                    <polyline points=polyline.clone() fill="none" stroke="var(--red)" stroke-width="2" vector-effect="non-scaling-stroke" />
+                                </svg>
+                            </Show>
+                            <Show when=move || !has_pulse fallback=|| ()>
+                                <div class="muted">"NO PULSE DATA IN RANGE"</div>
+                            </Show>
                         </div>
                     }
                 }}

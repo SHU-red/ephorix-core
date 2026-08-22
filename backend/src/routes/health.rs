@@ -16,6 +16,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::{
     auth::AuthUser,
@@ -137,6 +138,82 @@ pub async fn ingest_batch(
         "inserted": raw_inserted + normalized_count,
         "normalized": normalized_count,
     })))
+}
+
+/// Maximum points in a per-session pulse series; longer windows are
+/// bucketed down to keep the payload bounded.
+pub const PULSE_SERIES_MAX: usize = 120;
+
+/// Load one session window's heart-rate series from `raw_health_data` (the
+/// fast path the timeline reads — NOT the `measurements` mirror, which may
+/// lag or be incomplete for watch-pushed data) and derive avg/min/max plus
+/// a series bucketed to at most [`PULSE_SERIES_MAX`] points.
+///
+/// `end` is exclusive, matching the `/stats` measurements rollup window.
+/// The wire shape is `{"avgHr","minHr","maxHr","series"}` where the three
+/// stats are `null` and `series` is empty when the window has no HR rows.
+/// Bucket timestamps are the bucket-window start; `hr` is the rounded
+/// bucket mean. Also serves as the stats handler's fallback average when
+/// the stop-marker `avg_hr` is missing.
+pub async fn session_pulse(
+    pool: &PgPool,
+    user_id: Uuid,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<serde_json::Value, sqlx::Error> {
+    let rows: Vec<(DateTime<Utc>, i16)> = sqlx::query_as(
+        "SELECT timestamp, heart_rate FROM raw_health_data
+         WHERE user_id = $1 AND heart_rate IS NOT NULL
+           AND timestamp >= $2 AND timestamp < $3
+         ORDER BY timestamp",
+    )
+    .bind(user_id)
+    .bind(start)
+    .bind(end)
+    .fetch_all(pool)
+    .await?;
+
+    let avg_hr = if rows.is_empty() {
+        None
+    } else {
+        Some(rows.iter().map(|(_, hr)| f64::from(*hr)).sum::<f64>() / rows.len() as f64)
+    };
+    let min_hr = rows.iter().map(|(_, hr)| *hr).min();
+    let max_hr = rows.iter().map(|(_, hr)| *hr).max();
+
+    let series: Vec<serde_json::Value> = if rows.len() <= PULSE_SERIES_MAX {
+        rows.iter().map(|(t, hr)| json!({ "t": t, "hr": hr })).collect()
+    } else {
+        // Equal-width time slices over [start, end); each bucket holds the
+        // mean of the samples that fall into it.
+        let span_ms = (end - start).num_milliseconds().max(1) as f64;
+        let bucket_ms = span_ms / PULSE_SERIES_MAX as f64;
+        let mut buckets: Vec<(f64, usize)> = vec![(0.0, 0); PULSE_SERIES_MAX];
+        for (t, hr) in &rows {
+            let idx = (((*t - start).num_milliseconds() as f64) / bucket_ms).floor() as usize;
+            let b = &mut buckets[idx.min(PULSE_SERIES_MAX - 1)];
+            b.0 += f64::from(*hr);
+            b.1 += 1;
+        }
+        buckets
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.1 > 0)
+            .map(|(i, b)| {
+                json!({
+                    "t": start + chrono::Duration::milliseconds((i as f64 * bucket_ms).round() as i64),
+                    "hr": (b.0 / b.1 as f64).round() as i64,
+                })
+            })
+            .collect()
+    };
+
+    Ok(json!({
+        "avgHr": avg_hr,
+        "minHr": min_hr,
+        "maxHr": max_hr,
+        "series": series,
+    }))
 }
 
 /// Maximum calendar days accepted in one day-history payload (watch backfills

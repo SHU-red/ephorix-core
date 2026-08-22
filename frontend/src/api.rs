@@ -97,6 +97,30 @@ pub struct Detection {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PulsePoint {
+    /// ISO timestamp of the (possibly bucketed) sample.
+    pub t: String,
+    pub hr: i64,
+}
+
+/// Per-session pulse derived by the backend from raw_health_data: series
+/// stats plus the (bucketed, ≤120 point) series itself. All fields are
+/// absent/null when the session window has no heart-rate rows.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPulse {
+    #[serde(default)]
+    pub avg_hr: Option<f64>,
+    #[serde(default)]
+    pub min_hr: Option<i64>,
+    #[serde(default)]
+    pub max_hr: Option<i64>,
+    #[serde(default)]
+    pub series: Vec<PulsePoint>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionStats {
     pub duration_sec: i64,
     pub active_sec: i64,
@@ -108,6 +132,8 @@ pub struct SessionStats {
     pub sets: i64,
     pub total_reps: i64,
     pub volume_kg: f64,
+    #[serde(default)]
+    pub pulse: SessionPulse,
 }
 
 // ---------------------------------------------------------------------------

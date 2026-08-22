@@ -655,14 +655,14 @@ fn build_opts(width: i32) -> serde_json::Value {
         },
         "axes": [
             { "side": 2, "size": 40, "stroke": "#8a8a8a", "grid": { "show": true, "stroke": "#1c1c1c" },
-              "ticks": { "size": 80 }, "font": "11px 'IBM Plex Mono', monospace",
+              "ticks": { "size": 10 }, "font": "11px 'IBM Plex Mono', monospace",
               "values": "__ephorix_time__" },
             { "side": 3, "size": 46, "stroke": "#e53935", "grid": { "show": true, "stroke": "#141414" },
-              "ticks": { "size": 50 }, "font": "10px 'IBM Plex Mono', monospace" },
+              "ticks": { "size": 10 }, "font": "10px 'IBM Plex Mono', monospace" },
             { "side": 1, "size": 46, "scale": "y2", "stroke": "#4fc3f7", "grid": { "show": false },
-              "ticks": { "size": 50 }, "font": "10px 'IBM Plex Mono', monospace" },
+              "ticks": { "size": 10 }, "font": "10px 'IBM Plex Mono', monospace" },
             { "side": 1, "size": 46, "scale": "y3", "stroke": "#ffa726", "grid": { "show": false },
-              "ticks": { "size": 50 }, "font": "10px 'IBM Plex Mono', monospace" }
+              "ticks": { "size": 10 }, "font": "10px 'IBM Plex Mono', monospace" }
         ],
         "series": [
             {},
@@ -704,12 +704,12 @@ fn build_battery_opts(width: i32) -> serde_json::Value {
         },
         "axes": [
             { "side": 2, "size": 40, "stroke": "#8a8a8a", "grid": { "show": true, "stroke": "#1c1c1c" },
-              "ticks": { "size": 80 }, "font": "11px 'IBM Plex Mono', monospace",
+              "ticks": { "size": 10 }, "font": "11px 'IBM Plex Mono', monospace",
               "values": "__ephorix_time__" },
             { "side": 3, "size": 46, "stroke": "#90a4ae", "grid": { "show": true, "stroke": "#141414" },
-              "ticks": { "size": 50 }, "font": "10px 'IBM Plex Mono', monospace" },
+              "ticks": { "size": 10 }, "font": "10px 'IBM Plex Mono', monospace" },
             { "side": 1, "size": 46, "scale": "y2", "stroke": "#e53935", "grid": { "show": false },
-              "ticks": { "size": 50 }, "font": "10px 'IBM Plex Mono', monospace" },
+              "ticks": { "size": 10 }, "font": "10px 'IBM Plex Mono', monospace" },
             { "side": 1, "size": 46, "stroke": "transparent", "grid": { "show": false },
               "ticks": { "show": false }, "border": { "show": false }, "values": [] }
         ],

@@ -596,11 +596,78 @@ select { min-width: 120px; }
 .btn.danger { border-color: var(--red-dark); color: var(--red-bright); }
 .btn.danger:hover { background: var(--red-dark); color: #000; }
 
-/* ---------------- Skopos (activity log) ---------------- */
+/* ---------------- Skopos (unified log window) ---------------- */
 
 .log-list { max-height: 520px; overflow-y: auto; }
-.log-kind { flex: 0 0 auto; width: 92px; color: var(--red); font-size: 10px; letter-spacing: 0.14em; }
+.log-kind {
+  flex: 0 0 auto;
+  min-width: 78px;
+  padding: 3px 8px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  color: var(--red);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-align: center;
+}
 .log-msg { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+/* One accent hue per classification (theme-consistent on the dark panel). */
+.log-kind--ui { color: #e53935; }
+.log-kind--api { color: #26c6da; }
+.log-kind--settings { color: #ffc107; }
+.log-kind--ai { color: #b388ff; }
+.log-kind--agoge { color: #ff7043; }
+.log-kind--detection { color: #66bb6a; }
+.log-kind--nutrition { color: #d4e157; }
+.log-kind--measurement { color: #4db6ac; }
+.log-kind--import { color: #42a5f5; }
+.log-kind--action { color: #ec407a; }
+
+/* Filter bar: classification toggles, time-range select, fuzzy search. */
+.log-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: #030303;
+}
+.log-filter-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.log-filter-label { flex: 0 0 auto; color: var(--dim); font-size: 10px; letter-spacing: 0.16em; }
+.log-kind-switch { flex: 1; }
+.log-kind-btn {
+  background: #030303; color: var(--muted);
+  border: 1px solid var(--line); padding: 5px 10px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 10px;
+  letter-spacing: 0.1em; cursor: pointer;
+}
+.log-kind-btn:hover { border-color: var(--red); color: var(--red); }
+.log-kind-btn.on { background: var(--red); color: #000; border-color: var(--red); }
+.log-filter-select {
+  background: #030303; color: var(--muted);
+  border: 1px solid var(--line); padding: 6px 10px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px;
+  letter-spacing: 0.08em;
+}
+.log-filter-input {
+  flex: 1; min-width: 180px;
+  background: #030303; color: var(--text);
+  border: 1px solid var(--line); padding: 6px 10px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px;
+  letter-spacing: 0.06em;
+}
+.log-filter-input:focus, .log-filter-select:focus { outline: none; border-color: var(--red); }
+
+.log-reverted {
+  flex: 0 0 auto;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  padding: 3px 8px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+}
 /* ---------------- Tabs ---------------- */
 
 .tabs {
@@ -703,11 +770,17 @@ select { min-width: 120px; }
   background: var(--red);
   color: #000;
   clip-path: polygon(9px 0, 100% 0, calc(100% - 9px) 100%, 0 100%);
-  padding-left: 16px;
-  padding-right: 12px;
   font-family: "Anton", "Arial Narrow", sans-serif;
-  letter-spacing: 0.12em;
   filter: drop-shadow(0 0 8px rgba(229, 57, 53, 0.45));
+}
+/* These buttons also carry .btn.small (10px font, 4px/10px padding), whose
+   higher specificity would otherwise win — force the readable size here.
+   Left padding stays >= the 9px parallelogram clip offset so text never clips. */
+.btn.small.pythia-btn {
+  padding: 6px 12px 6px 16px;
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  line-height: 1;
 }
 .pythia-btn:hover {
   background: var(--red-bright);
@@ -739,19 +812,6 @@ select { min-width: 120px; }
   line-height: 1.5;
 }
 .measure-list { max-height: 260px; }
-
-/* Skopos persisted action log. */
-.action-list { max-height: 340px; }
-.action-kind { flex: 0 0 auto; width: 110px; color: var(--red); font-size: 10px; letter-spacing: 0.14em; }
-.action-target { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.action-reverted {
-  flex: 0 0 auto;
-  color: var(--dim);
-  border: 1px solid var(--line);
-  padding: 3px 8px;
-  font-size: 9px;
-  letter-spacing: 0.14em;
-}
 
 /* Collapsible advanced config (Nomoi AI provider). */
 details.advanced {
@@ -942,8 +1002,11 @@ footer {
 
 /* Overflow guard: the layout is designed to fit 360px; a stray fixed pixel
    width (chips, readouts, chart canvas, tooltip) must never force a
-   horizontal scrollbar. */
+   horizontal scrollbar. Use overflow-x: clip — NOT hidden — because hidden
+   turns body/html into a scroll container and kills position:sticky on the
+   tab bar (sticky sticks to the body scrollport, which never scrolls). */
 html, body { overflow-x: hidden; }
+html, body { overflow-x: clip; }
 
 @media (max-width: 720px) {
   /* Chart rows stack: the legend drops under the chart/strip it describes,
@@ -1007,24 +1070,29 @@ html, body { overflow-x: hidden; }
   align-items: center;
   gap: 8px;
   padding: 10px 16px;
+  padding-left: 18px;
   background: var(--red);
   color: #000;
   border: 1px solid var(--red-bright);
   font-family: "Anton", "Arial Narrow", sans-serif;
-  font-size: 14px;
-  letter-spacing: 0.18em;
+  font-size: 13px;
+  letter-spacing: 0.14em;
   cursor: pointer;
-  box-shadow: 0 0 18px var(--glow), 0 6px 18px rgba(0, 0, 0, 0.55);
+  /* Same clipped parallelogram silhouette + glow as every .pythia-btn
+     (box-shadow would be cut by clip-path, so the glow rides on drop-shadow). */
+  clip-path: polygon(9px 0, 100% 0, calc(100% - 9px) 100%, 0 100%);
+  filter: drop-shadow(0 0 8px rgba(229, 57, 53, 0.45)) drop-shadow(0 6px 10px rgba(0, 0, 0, 0.6));
 }
 .oracle-fab:hover {
   background: var(--red-bright);
-  box-shadow: 0 0 28px var(--glow), 0 6px 18px rgba(0, 0, 0, 0.55);
+  filter: drop-shadow(0 0 16px rgba(229, 57, 53, 0.85)) drop-shadow(0 6px 10px rgba(0, 0, 0, 0.6));
 }
 .oracle-fab-glyph svg {
-  width: 15px;
-  height: 15px;
-  display: block;
-  stroke: #000;
+  width: 13px;
+  height: 13px;
+  display: inline-block;
+  vertical-align: -2px;
+  filter: brightness(0);
 }
 
 .oracle-panel {
@@ -1032,14 +1100,15 @@ html, body { overflow-x: hidden; }
   right: 22px;
   bottom: 74px;
   z-index: 70;
-  width: min(560px, 92vw);
-  height: min(70vh, 560px);
   min-width: 320px;
   min-height: 320px;
+  max-width: 92vw;
+  max-height: 70vh;
   display: flex;
   flex-direction: column;
-  /* The oracle is resizable by the user (drag the corner). */
-  resize: both;
+  /* Sized via the custom top-left grip (.oracle-resize; pointer-drag in
+     app.rs). The browser's bottom-right corner grip (CSS `resize`) is gone;
+     the inline width/height from that grip are clamped by min/max here. */
   overflow: auto;
   background: linear-gradient(180deg, var(--panel-2), var(--panel));
   border: 1px solid var(--red-bright);
@@ -1057,7 +1126,8 @@ html, body { overflow-x: hidden; }
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  /* Left padding clears the top-left resize grip. */
+  padding: 10px 12px 10px 34px;
   border-bottom: 1px solid var(--line);
   background: var(--red-deep);
   flex: none;
@@ -1074,12 +1144,41 @@ html, body { overflow-x: hidden; }
   background: none;
   border: 1px solid transparent;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1;
   cursor: pointer;
-  padding: 2px 8px;
+  padding: 6px 10px;
   min-width: 0;
 }
-.oracle-close:hover { color: #fff; border-color: var(--red); }
+.oracle-close:hover {
+  color: #fff;
+  border-color: var(--red);
+  background: rgba(229, 57, 53, 0.12);
+}
+
+/* Custom top-left resize grip (pointer-drag handlers live in app.rs): a
+   corner L in the panel's top-left, drawn with pseudo-element borders. */
+.oracle-resize {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 20px;
+  height: 20px;
+  cursor: nwse-resize;
+  touch-action: none;
+  z-index: 6;
+}
+.oracle-resize::before,
+.oracle-resize::after {
+  content: "";
+  position: absolute;
+  border-top: 2px solid var(--red-bright);
+  border-left: 2px solid var(--red-bright);
+}
+.oracle-resize::before { top: 5px; left: 5px; width: 8px; height: 8px; }
+.oracle-resize::after { top: 9px; left: 9px; width: 5px; height: 5px; opacity: 0.55; }
+.oracle-resize:hover::before,
+.oracle-resize:hover::after { border-color: #fff; opacity: 1; }
 
 /* State digest strip: compact read-only chips. */
 .oracle-digest {
@@ -1246,7 +1345,8 @@ html, body { overflow-x: hidden; }
   .oracle-panel {
     right: 10px;
     left: 10px;
-    width: auto;
+    /* !important beats the inline width written by the resize grip. */
+    width: auto !important;
     bottom: 70px;
     max-height: 74vh;
   }

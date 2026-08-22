@@ -14,6 +14,7 @@ use crate::{
     auth::AuthUser,
     error::{ApiError, ApiResult},
     models::AgogeSession,
+    routes::health::session_pulse,
 };
 
 #[derive(Debug, Deserialize)]
@@ -49,7 +50,28 @@ pub async fn list(
     .bind(q.limit.unwrap_or(200))
     .fetch_all(&pool)
     .await?;
-    Ok(Json(json!({ "sessions": sessions })))
+    // Wire shape is exactly what the cards need (type, status, start/end,
+    // watch summary: duration / avg HR / kcal / reps / intensity / distance)
+    // — no internal row fields (user_id, created_at, updated_at).
+    let out: Vec<serde_json::Value> = sessions
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "typeId": s.type_id,
+                "startTime": s.start_time,
+                "endTime": s.end_time,
+                "status": s.status,
+                "durationSec": s.duration_sec,
+                "workoutKcal": s.workout_kcal,
+                "avgHr": s.avg_hr,
+                "reps": s.reps,
+                "movementIntensity": s.movement_intensity,
+                "distanceM": s.distance_m,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "sessions": out })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,15 +186,27 @@ pub async fn delete(
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Delete the session AND its own marker stream atomically. The markers
+    // are linked via session_id (FK ON DELETE SET NULL) — leaving them would
+    // orphan unattributable pause/resume rows that could leak into another
+    // session's stats by time-range overlap. exercise_sets cascade via their
+    // FK; nothing else references a session.
+    let mut tx = pool.begin().await?;
+    let markers = sqlx::query("DELETE FROM agoge_markers WHERE session_id = $1 AND user_id = $2")
+        .bind(id)
+        .bind(user.0)
+        .execute(&mut *tx)
+        .await?;
     let res = sqlx::query("DELETE FROM agoge_sessions WHERE id = $1 AND user_id = $2")
         .bind(id)
         .bind(user.0)
-        .execute(&pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound(format!("session {id} not found")));
     }
-    Ok(Json(json!({ "deleted": id })))
+    Ok(Json(json!({ "deleted": id, "markers": markers.rows_affected() })))
 }
 
 /// Aggregate stats for one session: duration, pause time, and measurement
@@ -258,17 +292,41 @@ pub async fn stats(
     .fetch_one(&pool)
     .await?;
 
+    // Pulse source of truth: the session window's heart-rate series read
+    // from raw_health_data (the fast path the timeline uses). avgHr/minHr/
+    // maxHr are null and series is empty when the window has no HR rows.
+    let pulse = session_pulse(&pool, user.0, session.start_time, end).await?;
+
+    // avgHr precedence: the watch's stop-marker average when present, else
+    // the average computed from raw_health_data, else the measurements
+    // rollup (imported/non-Pebble sources), else 0.
+    let avg_hr = session
+        .avg_hr
+        .filter(|v| *v > 0)
+        .map(f64::from)
+        .or_else(|| pulse["avgHr"].as_f64())
+        .or_else(|| (agg.2 > 0.0).then_some(agg.2))
+        .unwrap_or(0.0);
+    // peakHr keeps the measurements max (exact per-minute values) and falls
+    // back to the raw_health_data max when measurements have none.
+    let peak_hr = if agg.3 > 0.0 {
+        agg.3.round() as i64
+    } else {
+        pulse["maxHr"].as_i64().unwrap_or(0)
+    };
+
     Ok(Json(json!({
         "durationSec": duration_sec,
         "activeSec": duration_sec - pause_sec,
         "pauseSec": pause_sec,
         "reps": agg.0.round() as i64,
         "calories": agg.1,
-        "avgHr": agg.2,
-        "peakHr": agg.3.round() as i64,
+        "avgHr": avg_hr,
+        "peakHr": peak_hr,
         "sets": sets_agg.0,
         "totalReps": sets_agg.1,
         "volumeKg": sets_agg.2,
+        "pulse": pulse,
     })))
 }
 
