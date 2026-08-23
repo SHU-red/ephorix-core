@@ -32,6 +32,19 @@ pub struct UpsertType {
     pub category: Option<String>,
     #[serde(default)]
     pub config: Option<serde_json::Value>,
+    /// Seconds between heart-rate samples while an Agoge of this type runs.
+    /// 0 = OS automatic. Invalid values fall back to the 60 s default.
+    #[serde(default)]
+    pub hr_sampling_interval: Option<i32>,
+}
+
+/// Allowed HR sampling intervals (seconds) — the same choices as the watch's
+/// Auto Push menu. 15/30/60 min are accepted for forward compatibility but
+/// the OS clamps any request above 600 s.
+const HR_INTERVALS: [i32; 7] = [0, 60, 300, 600, 900, 1800, 3600];
+
+fn normalize_hr_interval(v: Option<i32>) -> Option<i32> {
+    v.filter(|x| HR_INTERVALS.contains(x))
 }
 
 const CATEGORIES: [&str; 6] = [
@@ -63,9 +76,10 @@ pub async fn create(
     }
     let category = normalize_category(body.category);
     let config = normalize_config(body.config);
+    let hr_interval = normalize_hr_interval(body.hr_sampling_interval).unwrap_or(60);
     let ty = sqlx::query_as::<_, AgogeType>(
-        "INSERT INTO agoge_types (name, color_code, icon, category, config)
-         VALUES ($1, $2, $3, $4, $5)
+        "INSERT INTO agoge_types (name, color_code, icon, category, config, hr_sampling_interval)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING *",
     )
     .bind(name)
@@ -73,6 +87,7 @@ pub async fn create(
     .bind(body.icon.unwrap_or_else(|| "dumbbell".to_string()))
     .bind(&category)
     .bind(&config)
+    .bind(hr_interval)
     .fetch_one(&pool)
     .await?;
     Ok((axum::http::StatusCode::CREATED, Json(ty)))
@@ -85,13 +100,15 @@ pub async fn update(
 ) -> ApiResult<Json<AgogeType>> {
     let category = normalize_category(body.category);
     let config = normalize_config(body.config);
+    let hr_interval = normalize_hr_interval(body.hr_sampling_interval);
     let ty = sqlx::query_as::<_, AgogeType>(
         "UPDATE agoge_types
          SET name = $2,
              color_code = COALESCE($3, color_code),
              icon = COALESCE($4, icon),
              category = $5,
-             config = $6
+             config = $6,
+             hr_sampling_interval = COALESCE($7, hr_sampling_interval)
          WHERE id = $1
          RETURNING *",
     )
@@ -101,6 +118,7 @@ pub async fn update(
     .bind(body.icon)
     .bind(&category)
     .bind(&config)
+    .bind(hr_interval)
     .fetch_optional(&pool)
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("agoge type {id} not found")))?;

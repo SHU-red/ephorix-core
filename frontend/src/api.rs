@@ -17,6 +17,12 @@ pub struct AgogeType {
     pub category: String,
     #[serde(default)]
     pub config: serde_json::Value,
+    #[serde(default = "default_hr_interval")]
+    pub hr_sampling_interval: i64,
+}
+
+fn default_hr_interval() -> i64 {
+    60
 }
 
 #[derive(Debug, Clone, Deserialize)]

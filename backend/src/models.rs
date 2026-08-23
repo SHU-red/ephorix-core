@@ -15,6 +15,9 @@ pub struct AgogeType {
     pub icon: String,
     pub category: String,
     pub config: serde_json::Value,
+    /// Heart-rate sampling interval in seconds while an Agoge of this type
+    /// runs (0 = OS automatic). Mirrored to the watch with each type list.
+    pub hr_sampling_interval: i32,
     pub created_at: DateTime<Utc>,
 }
 

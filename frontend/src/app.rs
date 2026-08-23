@@ -1267,7 +1267,7 @@ pub fn App() -> impl IntoView {
 
     // -- Agoge types CRUD ----------------------------------------------------
 
-    let create_type = move |name: String, color: String, icon: String, category: String, config: Value| {
+    let create_type = move |name: String, color: String, icon: String, category: String, config: Value, hr_interval: i64| {
         let name = name.trim().to_string();
         if name.is_empty() {
             return;
@@ -1275,7 +1275,7 @@ pub fn App() -> impl IntoView {
         let base = base.get();
         let token = token.get();
         spawn_local(async move {
-            let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category, "config": config });
+            let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category, "config": config, "hrSamplingInterval": hr_interval });
             match post_json(&base, &token, "/api/v1/agoge-types", &body).await {
                 Ok(_) => { log_event("agoge", "created agoge"); refresh(); }
                 Err(e) => set_error.set(Some(e)),
@@ -1283,11 +1283,11 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    let update_type = move |id: String, name: String, color: String, icon: String, category: String, config: Value| {
+    let update_type = move |id: String, name: String, color: String, icon: String, category: String, config: Value, hr_interval: i64| {
         let base = base.get();
         let token = token.get();
         spawn_local(async move {
-            let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category, "config": config });
+            let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category, "config": config, "hrSamplingInterval": hr_interval });
             match put_json(&base, &token, &format!("/api/v1/agoge-types/{id}"), &body).await {
                 Ok(_) => {
                     log_event("agoge", "updated agoge");
@@ -2403,11 +2403,11 @@ pub fn App() -> impl IntoView {
                                         <div key=sel.clone()>
                                             <AgogeConfigForm
                                                 ty=ty
-                                                on_save=Callback::new(move |(n, c, i, cat, cfg): (String, String, String, String, Value)| {
+                                                on_save=Callback::new(move |(n, c, i, cat, cfg, hr): (String, String, String, String, Value, i64)| {
                                                     if let Some(id) = sel.clone() {
-                                                        update_type(id, n, c, i, cat, cfg);
+                                                        update_type(id, n, c, i, cat, cfg, hr);
                                                     } else {
-                                                        create_type(n, c, i, cat, cfg);
+                                                        create_type(n, c, i, cat, cfg, hr);
                                                     }
                                                     set_selected_id.set(None);
                                                 })
@@ -3759,7 +3759,7 @@ fn SessionRow(
 #[component]
 fn AgogeConfigForm(
     ty: Option<AgogeType>,
-    on_save: Callback<(String, String, String, String, Value)>,
+    on_save: Callback<(String, String, String, String, Value, i64)>,
     on_delete: Callback<String>,
 ) -> impl IntoView {
     let is_new = ty.is_none();
@@ -3769,6 +3769,17 @@ fn AgogeConfigForm(
     let (icon, set_icon) = create_signal(ty.as_ref().map(|t| t.icon.clone()).unwrap_or_else(|| GLYPH_KEYS[0].to_string()));
     let initial_category = ty.as_ref().map(|t| t.category.clone()).unwrap_or_else(|| "mixed".to_string());
     let (category, set_category) = create_signal(initial_category.clone());
+    let (hr_interval, set_hr_interval) = create_signal(ty.as_ref().map(|t| t.hr_sampling_interval).unwrap_or(60));
+    // HR sampling choices (seconds), the same set as the watch Auto Push menu.
+    let hr_choices: [(i64, &str); 7] = [
+        (0, "OFF (OS automatic)"),
+        (60, "1 min — max HR quality"),
+        (300, "5 min"),
+        (600, "10 min"),
+        (900, "15 min"),
+        (1800, "30 min"),
+        (3600, "60 min — max battery"),
+    ];
     // Config object: pre-filled from the loaded type, otherwise defaults for
     // the (initial) category. An empty/null config falls back to defaults too.
     let config = create_rw_signal(
@@ -3851,8 +3862,20 @@ fn AgogeConfigForm(
                     </div>
                 }.into_view(),
             }}
+            <label class="ctl">"HEART-RATE LOGGING"
+                <select prop:value=move || hr_interval.get().to_string() on:change=move |ev| {
+                    if let Ok(v) = event_target_value(&ev).parse::<i64>() {
+                        set_hr_interval.set(v);
+                    }
+                }>
+                    {hr_choices.iter().map(|(val, label)| {
+                        view! { <option value=val.to_string()>{*label}</option> }
+                    }).collect_view()}
+                </select>
+            </label>
+            <p class="muted">"While this Agoge is active the watch logs HR at this cadence (overrides Auto Push). Hiking with a long duration? Pick 30–60 min for battery."</p>
             <div class="config-actions">
-                <button class="btn" on:click=move |_| on_save.call((name.get(), color.get(), icon.get(), category.get(), config.get()))>
+                <button class="btn" on:click=move |_| on_save.call((name.get(), color.get(), icon.get(), category.get(), config.get(), hr_interval.get()))>
                     {if is_new { "CREATE" } else { "SAVE" }}
                 </button>
                 {existing_id.clone().map(|id| {
