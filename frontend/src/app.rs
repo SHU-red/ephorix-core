@@ -3863,13 +3863,14 @@ fn AgogeConfigForm(
                 }.into_view(),
             }}
             <label class="ctl">"HEART-RATE LOGGING"
-                <select prop:value=move || hr_interval.get().to_string() on:change=move |ev| {
+                <select on:change=move |ev| {
                     if let Ok(v) = event_target_value(&ev).parse::<i64>() {
                         set_hr_interval.set(v);
                     }
                 }>
                     {hr_choices.iter().map(|(val, label)| {
-                        view! { <option value=val.to_string()>{*label}</option> }
+                        let v = *val;
+                        view! { <option value=val.to_string() selected=move || hr_interval.get() == v>{*label}</option> }
                     }).collect_view()}
                 </select>
             </label>
