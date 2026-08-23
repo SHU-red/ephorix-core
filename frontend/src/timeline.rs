@@ -17,6 +17,7 @@ use std::rc::Rc;
 use wasm_bindgen::{closure::Closure, prelude::wasm_bindgen, JsCast};
 
 use crate::api::{ms_from_iso, AgogeSession, AgogeType, BatterySeriesPoint, NutritionEvent, SleepDay, TimelinePoint};
+use crate::icons::{glyph_key, glyph_svg_tinted};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +52,8 @@ extern "C" {
     fn ephorix_create(el_id: &str, opts_json: &str, data_json: &str) -> u32;
     #[wasm_bindgen(js_namespace = EphoriX, js_name = setData)]
     fn ephorix_set_data(id: u32, data_json: &str);
+    #[wasm_bindgen(js_namespace = EphoriX, js_name = setDataKeepZoom)]
+    fn ephorix_set_data_keep_zoom(id: u32, data_json: &str);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = setSeriesShow)]
     fn ephorix_set_series_show(id: u32, series_idx: u32, show: bool);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = onDrag)]
@@ -155,7 +158,10 @@ pub fn TimelineChart(
     clear_trigger: RwSignal<u32>,
     reset_zoom: RwSignal<u32>,
     on_click_at: Callback<f64>,
-    on_zoom: Callback<()>,
+    /// Fired after a manual drag-zoom: `Some((from, to))` with the new
+    /// x-domain when the drag changed x (so the parent can refetch data
+    /// bucketed to that zoom), `None` for a y-only zoom.
+    on_zoom: Callback<Option<(f64, f64)>>,
     on_ready: Callback<u32>,
     on_session_click: Callback<String>,
 ) -> impl IntoView {
@@ -176,6 +182,10 @@ pub fn TimelineChart(
     // Bumped by the bridge after every x-scale change (zoom, reset, data
     // resync) so plot-relative overlays re-position with the new domain.
     let zoom_version = create_rw_signal(0u32);
+    // When a drag-zoom triggers a refetch (on_zoom), the incoming data push
+    // must keep the current x-domain instead of re-fitting to the full range.
+    // Set by the drag handler, cleared by the reset-zoom path.
+    let preserve_zoom = create_rw_signal(false);
 
     // Destroy uPlot instances when this component unmounts (tab switch).
     on_cleanup(move || {
@@ -199,8 +209,11 @@ pub fn TimelineChart(
     });
 
     // Reset all axes on demand (bumped by the RESET ZOOM button / range change).
+    // A reset also abandons any pending keep-zoom: the next data push re-fits
+    // the new range's full extent.
     create_effect(move |_| {
         let _ = reset_zoom.get();
+        preserve_zoom.set(false);
         let id = chart_id.get();
         if id != 0 {
             ephorix_reset_zoom(id);
@@ -233,8 +246,16 @@ pub fn TimelineChart(
                 let Ok(r) = serde_json::from_str::<DragRect>(&json) else { return };
                 if zoom_mode.get_untracked() {
                     ephorix_zoom_to(id, r.x0, r.x1, r.y0, r.y1, &r.dir);
-                    // Manual zoom desyncs the parent's range-chip highlight.
-                    on_zoom.call(());
+                    // Manual zoom desyncs the parent's range-chip highlight;
+                    // a real x-zoom hands the new domain up so the parent can
+                    // refetch data bucketed to this zoom (and the refetched
+                    // data push keeps this domain via preserve_zoom).
+                    if r.dir == "y" {
+                        on_zoom.call(None);
+                    } else {
+                        preserve_zoom.set(true);
+                        on_zoom.call(Some((r.x0.min(r.x1), r.x0.max(r.x1))));
+                    }
                 } else {
                     set_selection.set(Some((r.x0, r.x1)));
                 }
@@ -268,14 +289,19 @@ pub fn TimelineChart(
         }
     });
 
-    // Push new data into the existing chart.
+    // Push new data into the existing chart. After a drag-zoom refetch
+    // (preserve_zoom), keep the current x-domain instead of re-fitting full.
     create_effect(move |_| {
         let id = chart_id.get();
         if id == 0 {
             return;
         }
         let data = build_data(points.get());
-        ephorix_set_data(id, &data.to_string());
+        if preserve_zoom.get_untracked() {
+            ephorix_set_data_keep_zoom(id, &data.to_string());
+        } else {
+            ephorix_set_data(id, &data.to_string());
+        }
     });
     // Battery chart: stress + body battery, x-axis locked to the main chart.
     create_effect(move |_| {
@@ -298,7 +324,11 @@ pub fn TimelineChart(
             return;
         }
         let data = build_battery_data(battery.get());
-        ephorix_set_data(id, &data.to_string());
+        if preserve_zoom.get_untracked() {
+            ephorix_set_data_keep_zoom(id, &data.to_string());
+        } else {
+            ephorix_set_data(id, &data.to_string());
+        }
     });
 
     // Apply series visibility toggles.
@@ -643,7 +673,7 @@ fn build_opts(width: i32) -> serde_json::Value {
         "height": 440,
         // Sentinel consumed by uplot-bridge.js: paints subtle weekend bands
         // (local Sat+Sun) behind the series.
-        "weekendFill": "rgba(144, 164, 174, 0.055)",
+        "weekendFill": "rgba(144, 164, 174, 0.10)",
         "legend": { "show": false },
         "cursor": { "show": true, "points": { "show": true } },
         "select": { "show": false },
@@ -654,7 +684,7 @@ fn build_opts(width: i32) -> serde_json::Value {
             "y3": { "range": [0, null] }
         },
         "axes": [
-            { "side": 2, "size": 40, "stroke": "#8a8a8a", "grid": { "show": true, "stroke": "#1c1c1c" },
+            { "side": 2, "size": 40, "stroke": "#8a8a8a", "grid": { "show": true, "stroke": "rgba(255,255,255,0.14)" },
               "ticks": { "size": 10 }, "font": "11px 'IBM Plex Mono', monospace",
               "values": "__ephorix_time__" },
             { "side": 3, "size": 46, "stroke": "#e53935", "grid": { "show": true, "stroke": "#141414" },
@@ -669,9 +699,11 @@ fn build_opts(width: i32) -> serde_json::Value {
             { "label": "Heart rate (bpm)", "stroke": "#e53935", "width": 2.5,
               "fill": "rgba(229, 57, 53, 0.10)", "tooltip": "HR", "spanGaps": false,
               "points": { "show": "hover", "size": 3, "width": 1 } },
-            { "label": "Steps", "stroke": "#4fc3f7", "fill": "rgba(79, 195, 247, 0.18)",
-              "scale": "y2", "bars": true, "tooltip": "Steps", "spanGaps": false,
-              "points": { "show": "hover", "size": 3, "width": 1 } },
+            { "label": "Steps", "stroke": "#4fc3f7", "width": 1,
+              "scale": "y2", "steps": true,
+              "fillGradient": { "from": "rgba(79, 195, 247, 0.16)", "to": "rgba(79, 195, 247, 0)" },
+              "tooltip": "Steps", "spanGaps": false,
+              "points": { "show": "hover", "size": 2, "width": 1 } },
             { "label": "Active kcal", "stroke": "#ffa726", "width": 2,
               "scale": "y3", "tooltip": "kcal", "spanGaps": false,
               "points": { "show": "hover", "size": 3, "width": 1 } }
@@ -693,7 +725,7 @@ fn build_battery_opts(width: i32) -> serde_json::Value {
         "width": width,
         "height": 180,
         // Same weekend-band sentinel as the main chart (see build_opts).
-        "weekendFill": "rgba(144, 164, 174, 0.055)",
+        "weekendFill": "rgba(144, 164, 174, 0.10)",
         "legend": { "show": false },
         "cursor": { "show": true },
         "select": { "show": false },
@@ -812,6 +844,32 @@ fn render_overlay(
     }
 }
 
+/// Foreground color that reads on a hex slot background: near-black on light
+/// colors (e.g. bright-yellow walking), near-white on dark ones. Malformed or
+/// unknown colors fall back to light-on-dark.
+fn slot_fg(bg: &str) -> &'static str {
+    let hex = bg.trim().trim_start_matches('#');
+    let rd = |s: &str| u8::from_str_radix(s, 16).ok();
+    let (r, g, b) = match hex.len() {
+        6 => (rd(&hex[0..2]), rd(&hex[2..4]), rd(&hex[4..6])),
+        3 => (
+            rd(&hex[0..1]).map(|v| v * 17),
+            rd(&hex[1..2]).map(|v| v * 17),
+            rd(&hex[2..3]).map(|v| v * 17),
+        ),
+        _ => (None, None, None),
+    };
+    let (Some(r), Some(g), Some(b)) = (r, g, b) else {
+        return "#f5f5f5";
+    };
+    let lum = (0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)) / 255.0;
+    if lum > 0.5 {
+        "#0d0d0d"
+    } else {
+        "#f5f5f5"
+    }
+}
+
 /// "HH:MM" in local time, for workout slot labels.
 fn hhmm(ms: f64) -> String {
     let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms));
@@ -860,7 +918,10 @@ fn render_workout_popup(popup: &web_sys::HtmlDivElement, payload: &str) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else { return };
     let str_of = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
     let name = html_escape(str_of("name"));
-    let icon = html_escape(str_of("icon"));
+    // Icon is the raw type glyph key ("winged-foot"); render the real SVG
+    // tinted with the agoge color (the popup background is near-black, so
+    // the slot color itself provides the contrast).
+    let icon_svg = glyph_svg_tinted(glyph_key(str_of("icon")), str_of("color"));
     let color = html_escape(str_of("color"));
     let date = html_escape(str_of("date"));
     let start = html_escape(str_of("start"));
@@ -898,7 +959,7 @@ fn render_workout_popup(popup: &web_sys::HtmlDivElement, payload: &str) {
         })
         .unwrap_or_else(|| "—".to_string());
     popup.set_inner_html(&format!(
-        "<div class=\"wp-head\"><span class=\"wp-icon\" style=\"color:{color}\">{icon}</span>\
+        "<div class=\"wp-head\"><span class=\"wp-icon\" style=\"color:{color}\">{icon_svg}</span>\
          <span class=\"wp-name\">{name}</span></div>\
          <div class=\"wp-meta\">{date} <span class=\"wp-sep\">·</span> {start}–{end}</div>\
          <div class=\"wp-dur\">{duration}</div>\
@@ -953,10 +1014,12 @@ fn render_workout_strip(
         let matched = s.type_id.as_ref().and_then(|tid| types.iter().find(|t| &t.id == tid));
         let color = matched.map(|t| t.color_code.clone()).unwrap_or_else(|| "#7B0000".to_string());
         let name = matched.map(|t| t.name.clone()).unwrap_or_else(|| "Undefined".to_string());
-        let icon = matched
-            .map(|t| t.icon.clone())
-            .filter(|i| !i.is_empty())
-            .unwrap_or_else(|| "Λ".to_string());
+        let raw_icon = matched.map(|t| t.icon.clone()).filter(|i| !i.is_empty());
+        // Real SVG glyph (never the raw icon key like "winged-foot"), tinted
+        // to a color that contrasts with the slot's agoge color.
+        let fg = slot_fg(&color);
+        let icon_key = raw_icon.as_deref().map(glyph_key).unwrap_or("lambda");
+        let icon_svg = glyph_svg_tinted(icon_key, fg);
 
         let el = doc
             .create_element("div")
@@ -976,7 +1039,7 @@ fn render_workout_strip(
             .unwrap_or_else(|| (to - from) / 60_000.0);
         let payload = json!({
             "name": name,
-            "icon": icon,
+            "icon": raw_icon,
             "color": color,
             "date": popup_date(from),
             "start": hhmm(from),
@@ -992,12 +1055,26 @@ fn render_workout_strip(
         let _ = el.set_attribute("style", &format!("left:{left}px;width:{w}px;background:{color};"));
 
         let icon_el = doc.create_element("span").unwrap();
-        icon_el.set_class_name("workout-slot-icon");
-        icon_el.set_text_content(Some(&icon));
+        // `on-dark` adds a drop shadow so light glyphs read on dark slots.
+        let icon_class = if fg == "#f5f5f5" {
+            "workout-slot-icon on-dark"
+        } else {
+            "workout-slot-icon"
+        };
+        icon_el.set_class_name(icon_class);
+        icon_el.set_inner_html(&icon_svg);
         let _ = el.append_child(&icon_el);
 
         let label = doc.create_element("span").unwrap();
         label.set_class_name("workout-slot-label");
+        // Contrast foreground + matching halo for the agoge slot color
+        // (bright-yellow walking gets dark text, not white-on-yellow).
+        let (lcolor, lshadow) = if fg == "#f5f5f5" {
+            ("#f5f5f5", "0 0 3px rgba(0,0,0,0.8)")
+        } else {
+            ("#0d0d0d", "0 0 3px rgba(255,255,255,0.4)")
+        };
+        let _ = label.set_attribute("style", &format!("color:{lcolor};text-shadow:{lshadow};"));
         label.set_text_content(Some(&format!("{name}  {}–{}", hhmm(from), hhmm(to))));
         let _ = el.append_child(&label);
         let _ = container.append_child(&el);

@@ -32,6 +32,18 @@ pub fn glyph_svg(key: &str) -> &'static str {
     }
 }
 
+/// Same glyph as [`glyph_svg`] with the theme red (`#E53935`) replaced by a
+/// caller-chosen hex `color` — for tinted rendering on non-black surfaces
+/// (e.g. the colored workout-strip slots). Malformed colors fall back to the
+/// theme red rather than injecting anything into the SVG.
+pub fn glyph_svg_tinted(key: &str, color: &str) -> String {
+    let c = color.trim().to_ascii_lowercase();
+    let valid = (c.len() == 7 || c.len() == 4)
+        && c.starts_with('#')
+        && c[1..].chars().all(|ch| ch.is_ascii_hexdigit());
+    glyph_svg(key).replace("#E53935", if valid { &c } else { "#E53935" })
+}
+
 /// Maps a stored icon string (glyph key, legacy text name, or legacy emoji)
 /// to a glyph key. Unknown values -> lambda. Never panics, never breaks.
 pub fn glyph_key(icon: &str) -> &'static str {

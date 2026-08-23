@@ -317,6 +317,8 @@ select { min-width: 120px; }
    on its own in narrow slots. */
 .workout-slot .workout-slot-icon {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 12px;
   line-height: 1;
@@ -326,11 +328,21 @@ select { min-width: 120px; }
   pointer-events: none;
   user-select: none;
 }
+.workout-slot .workout-slot-icon svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+/* Light glyphs on dark slots get a soft halo so the stroke reads. */
+.workout-slot .workout-slot-icon.on-dark svg {
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.6));
+}
 .workout-slot .workout-slot-label { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.04em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff; text-shadow: 0 0 3px #000; padding: 0 6px; pointer-events: none; user-select: none; }
 /* Narrow slots (<44px, day zoom): drop the label, center the glyph so the
    symbol + color still identify the workout in the thinnest slot. */
 .workout-slot.narrow { justify-content: center; }
 .workout-slot.narrow .workout-slot-icon { padding: 0; }
+.workout-slot.narrow .workout-slot-icon svg { width: 18px; height: 18px; }
 .workout-slot.narrow .workout-slot-label { display: none; }
 .workout-slot.open { outline: 2px dashed #ff5252; }
 
@@ -355,7 +367,8 @@ select { min-width: 120px; }
   max-width: min(300px, calc(100vw - 16px));
 }
 .workout-popup .wp-head { display: flex; align-items: center; gap: 7px; }
-.workout-popup .wp-icon { font-size: 14px; line-height: 1; flex: 0 0 auto; }
+.workout-popup .wp-icon { font-size: 14px; line-height: 1; flex: 0 0 auto; display: inline-flex; }
+.workout-popup .wp-icon svg { width: 16px; height: 16px; display: block; }
 .workout-popup .wp-name { font-weight: 600; letter-spacing: 0.06em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workout-popup .wp-meta { color: var(--dim); margin-top: 3px; }
 .workout-popup .wp-sep { margin: 0 4px; }

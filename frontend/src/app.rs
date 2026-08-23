@@ -680,6 +680,13 @@ pub fn App() -> impl IntoView {
     // Highlighted range chip (None = nothing highlighted: a manual zoom
     // desyncs the chips from the actual x-domain until a preset is re-picked).
     let active_range = create_rw_signal(None::<i64>);
+    // Domain + bucket of the last timeline fetch: zoom-driven refetches only
+    // run when the new span needs a finer bucket, so small drags don't spam
+    // the API. `zoom_fetch_seq` is a monotonic guard — only the newest zoom
+    // refetch may apply its response.
+    let last_domain = create_rw_signal((0.0_f64, 0.0_f64));
+    let last_bucket = create_rw_signal(String::new());
+    let zoom_fetch_seq = create_rw_signal(0u32);
     let (selected_id, set_selected_id) = create_signal(None::<String>);
     let selected_session = create_rw_signal(None::<AgogeSession>);
     // Graphical start/end picking for the details panel: which bound a chart
@@ -826,6 +833,8 @@ pub fn App() -> impl IntoView {
         let to_ms = js_sys::Date::now();
         let from_ms = to_ms - days as f64 * 86_400_000.0;
         let bucket = nice_bucket((to_ms - from_ms) / 1000.0 / 800.0);
+        last_domain.set((from_ms, to_ms));
+        last_bucket.set(bucket.clone());
         log_event("api", &format!("sync · range {days}d"));
 
         spawn_local(async move {
@@ -947,6 +956,84 @@ pub fn App() -> impl IntoView {
     create_effect(move |_| {
         refresh();
     });
+
+    // Refetch the timeline + battery series for an arbitrary domain with a
+    // bucket sized to that span, so the steps/HR/kcal aggregation follows the
+    // current x-zoom. Overlays (sessions/nutrition/sleep) come along for the
+    // ride; the independent panels (readiness, detections, settings) are
+    // range-preset-scoped and stay untouched. The chart keeps its zoom via
+    // the bridge's setDataKeepZoom (driven by TimelineChart.preserve_zoom),
+    // so the finer data lands without the view snapping back to full.
+    let refresh_zoom = move |from: f64, to: f64| {
+        let seq = zoom_fetch_seq.get() + 1;
+        zoom_fetch_seq.set(seq);
+        let base = base.get();
+        let token = token.get();
+        let bucket = nice_bucket((to - from) / 1000.0 / 800.0);
+        log_event("api", &format!("sync · zoom {:.1}h", (to - from) / 3_600_000.0));
+        spawn_local(async move {
+            match fetch_timeline(&base, &token, from, to, &bucket).await {
+                Ok(mut tt) => {
+                    // Superseded by a newer zoom / range change: drop it.
+                    if zoom_fetch_seq.get() != seq {
+                        return;
+                    }
+                    // Pebble day-history backfill for spans covering days.
+                    if to - from >= 2.0 * 86_400_000.0 {
+                        match fetch_day_aggregates(&base, &token, from, to).await {
+                            Ok(rows) => {
+                                let b_secs = bucket_secs(&tt.bucket).unwrap_or_else(|| {
+                                    if tt.points.len() >= 2 {
+                                        (tt.points[tt.points.len() - 1].ts - tt.points[0].ts)
+                                            / (tt.points.len() - 1) as f64
+                                            / 1000.0
+                                    } else {
+                                        3600.0
+                                    }
+                                });
+                                merge_day_aggregates(&mut tt.points, &rows, b_secs);
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    set_points.set(tt.points);
+                    set_sessions.set(tt.sessions);
+                    set_nutrition.set(tt.nutrition);
+                    set_sleep.set(tt.sleep);
+                    last_domain.set((from, to));
+                    last_bucket.set(bucket.clone());
+                    match fetch_body_battery_series(&base, &token, from, to, &bucket).await {
+                        Ok(s) => set_battery_series.set(s),
+                        Err(_) => {}
+                    }
+                }
+                Err(e) => {
+                    if zoom_fetch_seq.get() == seq {
+                        set_error.set(Some(e));
+                    }
+                }
+            }
+        });
+    };
+
+    // Drag-zoom landed: desync the preset chips and refetch bucketed to the
+    // new domain — but only when the zoom actually needs a different bucket
+    // (tiny drags, or zooming back out, reuse the cached data).
+    let handle_zoom = move |range: Option<(f64, f64)>| {
+        active_range.set(None);
+        let Some((a, b)) = range else {
+            return; // y-only zoom: x-domain unchanged, nothing to refetch
+        };
+        let (from, to) = (a.min(b), a.max(b));
+        if to - from <= 0.0 {
+            return;
+        }
+        let bucket = nice_bucket((to - from) / 1000.0 / 800.0);
+        if bucket == last_bucket.get() {
+            return;
+        }
+        refresh_zoom(from, to);
+    };
 
     // Build provenance (one-shot, no auth): fetch /version.json baked by
     // scripts/publish.sh and render the footer line. Graceful: any failure
@@ -2316,7 +2403,7 @@ pub fn App() -> impl IntoView {
                                 clear_trigger=clear_sel
                                 reset_zoom=reset_zoom
                                 on_click_at=Callback::new(move |ts| handle_chart_click(ts))
-                                on_zoom=Callback::new(move |_| active_range.set(None))
+                                on_zoom=Callback::new(move |range| handle_zoom(range))
                                 on_ready=Callback::new(move |id| handle_chart_ready(id))
                                 on_session_click=Callback::new(move |sid| handle_session_click(sid))
                             />

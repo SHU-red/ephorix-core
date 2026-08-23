@@ -22,44 +22,128 @@
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   var DAY_MS = 86400000;
+  var HOUR_MS = 3600000;
 
   function pad(n) {
     return (n < 10 ? "0" : "") + n;
   }
 
-  /* X-axis label, driven by the tick INCREMENT (not the dataset span), so the
-     unit scales with the zoom level:
-       < 1 day    -> "14:30"
-       < 7 days   -> "Mon 5" | "SA 15" / "SO 15" on weekends (days)
-       < 28 days  -> "Mon 5 Aug"  (weeks; weekday prefix keeps the current day
-                                    identifiable at month zoom)
-       < 366 days -> "Aug" / "Aug '26" (months; year shown on January)
-       >= 1 year  -> "2026"         (years)
-     Resolves the "__ephorix_time__" sentinel injected from Rust opts JSON. */
-  function fmtTick(ms, incrMs) {
+  /* Calendar unit for the visible span, so the x-axis sections scale with the
+     zoom level:
+       < 1.5 h  -> 15-minute sections
+       < 6 h    -> 30-minute sections
+       < 1.5 d  -> hourly
+       < 14 d   -> daily (each local midnight)
+       < 90 d   -> weekly (each local Monday)
+       < 550 d  -> monthly (each 1st)
+       >= 550 d -> yearly (each Jan 1)
+     (The backend caps the range at 366 d, so "year" only appears for future
+     multi-year support, but the branch is harmless.) */
+  function timeUnitForSpan(spanMs) {
+    if (spanMs < 1.5 * HOUR_MS) return "15m";
+    if (spanMs < 6 * HOUR_MS) return "30m";
+    if (spanMs < 1.5 * DAY_MS) return "hour";
+    if (spanMs < 14 * DAY_MS) return "day";
+    if (spanMs < 90 * DAY_MS) return "week";
+    if (spanMs < 550 * DAY_MS) return "month";
+    return "year";
+  }
+
+  /* First calendar boundary of `unit` at/after `ms`, local time. */
+  function ceilToBoundary(unit, ms) {
     var d = new Date(ms);
-    if (incrMs < DAY_MS) {
+    switch (unit) {
+      case "15m":
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), Math.floor(d.getMinutes() / 15) * 15 + 15, 0, 0).getTime();
+      case "30m":
+        return d.getMinutes() < 30
+          ? new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), 30, 0, 0).getTime()
+          : new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours() + 1, 0, 0, 0).getTime();
+      case "hour":
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours() + 1, 0, 0, 0).getTime();
+      case "day":
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0).getTime();
+      case "week": {
+        var mon = new Date(d.getFullYear(), d.getMonth(), d.getDate() - ((d.getDay() + 6) % 7), 0, 0, 0, 0);
+        return mon.getTime() <= ms
+          ? new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() + 7, 0, 0, 0, 0).getTime()
+          : mon.getTime();
+      }
+      case "month":
+        return new Date(d.getFullYear(), d.getMonth() + 1, 1, 0, 0, 0, 0).getTime();
+      default: // year
+        return new Date(d.getFullYear() + 1, 0, 1, 0, 0, 0, 0).getTime();
+    }
+  }
+
+  /* Next boundary after `ms`. Walking via Date constructors normalizes DST,
+     month and year rollover so every divider stays on a whole local unit. */
+  function addUnit(unit, ms) {
+    var d = new Date(ms);
+    switch (unit) {
+      case "15m":
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes() + 15, 0, 0).getTime();
+      case "30m":
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes() + 30, 0, 0).getTime();
+      case "hour":
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours() + 1, 0, 0, 0).getTime();
+      case "day":
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0).getTime();
+      case "week":
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 7, 0, 0, 0, 0).getTime();
+      case "month":
+        return new Date(d.getFullYear(), d.getMonth() + 1, 1, 0, 0, 0, 0).getTime();
+      default: // year
+        return new Date(d.getFullYear() + 1, 0, 1, 0, 0, 0, 0).getTime();
+    }
+  }
+
+  /* X-axis label for a calendar boundary, styled per unit: HH:MM for sub-day
+     units, "SA 15" / "SO 15" on weekends for days, "Mon 5 Aug" for weeks,
+     "Aug" / "Aug '26" for months, "2026" for years. */
+  function fmtTick(ms, unit) {
+    var d = new Date(ms);
+    if (unit === "15m" || unit === "30m" || unit === "hour") {
       return pad(d.getHours()) + ":" + pad(d.getMinutes());
     }
-    if (incrMs < 7 * DAY_MS) {
+    if (unit === "day") {
       var dow = d.getDay();
-      // Weekends get a distinct SA/SO marker (all local time) so rest days
-      // read at a glance against the weekday "Mon 5" style.
       if (dow === 6) return "SA " + d.getDate();
       if (dow === 0) return "SO " + d.getDate();
       return DAYS[dow] + " " + d.getDate();
     }
-    if (incrMs < 28 * DAY_MS) {
+    if (unit === "week") {
       return DAYS[d.getDay()] + " " + d.getDate() + " " + MONTHS[d.getMonth()];
     }
-    if (incrMs < 366 * DAY_MS) {
+    if (unit === "month") {
       var m = MONTHS[d.getMonth()];
       return d.getMonth() === 0 ? m + " '" + String(d.getFullYear()).slice(2) : m;
     }
     return String(d.getFullYear());
   }
 
-  function timeAxisValues(u, splits) {
+  /* Calendar-aligned x-axis tick positions: one split per unit boundary in
+     the visible domain, so uPlot draws a grid divider for EVERY day / week /
+     month / year section (plus every hour / half-hour / quarter-hour at
+     sub-day zooms). */
+  function calendarSplits(u, axisIdx, min, max) {
+    if (min == null || max == null || max <= min) return [];
+    var unit = timeUnitForSpan(max - min);
+    var out = [];
+    var t = ceilToBoundary(unit, min);
+    while (t <= max) {
+      out.push(t);
+      t = addUnit(unit, t);
+    }
+    return out;
+  }
+
+  /* Labels for the calendar splits: only every ~MIN_LABEL_PX-th boundary is
+     labeled (empty strings elsewhere), so labels never collide while every
+     divider still draws a grid line. */
+  var MIN_LABEL_PX = 64;
+
+  function calendarValues(u, splits) {
     if (!splits || splits.length === 0) return [];
     var xmin = u.scales.x.min;
     var xmax = u.scales.x.max;
@@ -69,9 +153,19 @@
       xmin = xs[0];
       xmax = xs[xs.length - 1];
     }
-    var spanMs = xmax - xmin;
-    var incrMs = splits.length >= 2 ? splits[1] - splits[0] : spanMs;
-    return splits.map(function (t) { return fmtTick(t, incrMs); });
+    var unit = timeUnitForSpan(xmax - xmin);
+    var out = [];
+    var lastX = -Infinity;
+    for (var i = 0; i < splits.length; i++) {
+      var x = u.valToPos(splits[i], "x");
+      if (x - lastX >= MIN_LABEL_PX) {
+        out.push(fmtTick(splits[i], unit));
+        lastX = x;
+      } else {
+        out.push("");
+      }
+    }
+    return out;
   }
 
   /* Per-chart hover tooltip: a div positioned inside the uPlot root that
@@ -165,9 +259,23 @@
     // before uPlot normalizes the series config.
     var seriesMeta = [];
     (opts.series || []).forEach(function (s, i) {
-      if (s && s.bars) {
-        s.paths = uPlot.paths.bars({ size: [0, 30], align: 0 });
-        delete s.bars;
+      if (s && s.steps) {
+        // "Horizontal line data point" look: a flat segment per bucket value
+        // with a transparent vertical gradient underneath — no bold bars.
+        s.paths = uPlot.paths.stepped({ align: 1 });
+        delete s.steps;
+      }
+      if (s && s.fillGradient) {
+        var gFrom = s.fillGradient.from || s.fillGradient;
+        var gTo = s.fillGradient.to || "rgba(0,0,0,0)";
+        delete s.fillGradient;
+        s.fill = function (u) {
+          var g = u.ctx.createLinearGradient(0, u.bbox.top, 0, u.bbox.top + u.bbox.height);
+          g.addColorStop(0, gFrom);
+          g.addColorStop(0.5, gFrom);
+          g.addColorStop(1, gTo);
+          return g;
+        };
       }
       if (s && s.points && s.points.show === "hover") {
         s.points.show = function (u, seriesIdx) {
@@ -181,9 +289,12 @@
       }
     });
 
-    // Zoom-aware time labels (sentinel from Rust opts JSON).
+    // Zoom-aware calendar dividers + labels (sentinel from Rust opts JSON):
+    // one grid line per day/week/month/year section, aligned to local
+    // calendar boundaries.
     if (opts.axes && opts.axes[0] && opts.axes[0].values === "__ephorix_time__") {
-      opts.axes[0].values = timeAxisValues;
+      opts.axes[0].splits = calendarSplits;
+      opts.axes[0].values = calendarValues;
     }
 
     var chart = new uPlot(opts, data, el);
@@ -218,6 +329,26 @@
     if (group) {
       recomputeFull(group);
       if (group.full) setGroupX(group, group.full[0], group.full[1]);
+    }
+  }
+
+  /* setData that PRESERVES the current x-domain instead of re-fitting the
+     group to the full data extent. Used when a zoom-triggered refetch lands:
+     the visible zoom must survive the finer-bucket data push. Re-asserts the
+     pre-setData scale on every group member (read first — uPlot may reset
+     auto scales on setData), keeping the linked charts in lockstep. */
+  function setDataKeepZoom(id, dataJson) {
+    var c = charts.get(id);
+    if (!c) return;
+    var group = groupOf(id);
+    var lo = c.scales.x.min;
+    var hi = c.scales.x.max;
+    c.setData(JSON.parse(dataJson));
+    if (group) recomputeFull(group);
+    if (lo != null && hi != null && isFinite(lo) && isFinite(hi)) {
+      setGroupX(group, lo, hi);
+    } else if (group && group.full) {
+      setGroupX(group, group.full[0], group.full[1]);
     }
   }
 
@@ -592,6 +723,7 @@
   global.EphoriX = {
     create: create,
     setData: setData,
+    setDataKeepZoom: setDataKeepZoom,
     setSeriesShow: setSeriesShow,
     destroy: destroy,
     onDrag: onDrag,
