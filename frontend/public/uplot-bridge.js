@@ -7,8 +7,7 @@
  *  - chart lifecycle (create / setData / destroy)
  *  - linked x-axis groups: two charts share one x-domain, kept in lock-step
  *    across create, setData, zoom and reset
- *  - direction-aware drag zoom: horizontal drag -> full-height band (x-only),
- *    vertical drag -> full-width band (y-only), diagonal -> box (both)
+ *  - middle-button drag pans the x-axis (both linked charts together)
  *  - zoom-level-aware time axis labels (hours / days / weeks / months / years)
  *  - cursor time + coordinate mapping for the session overlay
  *  - x-scale change listeners (DOM overlays that must track the zoom)
@@ -236,6 +235,13 @@
           var R = Math.min(u.valToPos(Math.min(next.getTime(), xmax), "x") + b.left, b.left + b.width);
           if (R > L) {
             ctx.fillRect(L, b.top, R - L, b.height);
+            // Label the block so the weekend fill is self-identifying:
+            // small "SA" / "SO" at the top-left of each band, matching the
+            // x-axis tick abbreviations.
+            ctx.fillStyle = "rgba(144, 164, 174, 0.6)";
+            ctx.font = "10px sans-serif";
+            ctx.fillText(dow === 6 ? "SA" : "SO", L + 4, b.top + 12);
+            ctx.fillStyle = fill;
           }
           d = next;
         } else {
@@ -543,7 +549,11 @@
       overlay: null,
       dragging: false,
       startX: 0,
-      startY: 0
+      startY: 0,
+      panning: false,
+      panStartX: 0,
+      panStartMin: 0,
+      panStartMax: 0
     };
     interactions.set(id, state);
 
@@ -602,6 +612,24 @@
     }
 
     root.addEventListener("pointerdown", function (e) {
+      // Middle-button drag pans the x-axis; both linked charts move together
+      // via setGroupX. Clamped to the loaded data extent below, so the view
+      // never floats into empty space. preventDefault stops the browser's
+      // native middle-click autoscroll.
+      if (e.button === 1) {
+        var xs = c.scales.x;
+        if (xs.min == null || xs.max == null) return;
+        var r = root.getBoundingClientRect();
+        state.panning = true;
+        state.panStartX = e.clientX - r.left;
+        state.panStartMin = xs.min;
+        state.panStartMax = xs.max;
+        if (root.setPointerCapture) {
+          try { root.setPointerCapture(e.pointerId); } catch (err) { /* no-op */ }
+        }
+        e.preventDefault();
+        return;
+      }
       if (e.button !== 0) return;
       ensureOverlay();
       var r = root.getBoundingClientRect();
@@ -615,6 +643,33 @@
     });
 
     root.addEventListener("pointermove", function (e) {
+      if (state.panning) {
+        var r = root.getBoundingClientRect();
+        var dx = (e.clientX - r.left) - state.panStartX;
+        var span = state.panStartMax - state.panStartMin;
+        if (span <= 0 || !c.bbox || c.bbox.width <= 0) return;
+        var msPerPx = span / c.bbox.width;
+        var lo = state.panStartMin - dx * msPerPx;
+        var hi = state.panStartMax - dx * msPerPx;
+        // Clamp to the loaded data extent (linked group full, else data xs).
+        var g = groupOf(id);
+        var full = g && g.full ? g.full : null;
+        if (!full) {
+          var x0 = c.data && c.data[0];
+          if (x0 && x0.length) full = [x0[0], x0[x0.length - 1]];
+        }
+        if (full) {
+          if (lo < full[0]) { hi -= lo - full[0]; lo = full[0]; }
+          if (hi > full[1]) { lo -= hi - full[1]; hi = full[1]; }
+        }
+        if (g) {
+          setGroupX(g, lo, hi);
+        } else {
+          c.setScale("x", { min: lo, max: hi });
+          fireScaleChange(id);
+        }
+        return;
+      }
       if (!state.dragging) return;
       var r = root.getBoundingClientRect();
       var cx = e.clientX - r.left;
@@ -624,6 +679,7 @@
     });
 
     function finish(e) {
+      state.panning = false;
       if (!state.dragging) return;
       state.dragging = false;
       var r = root.getBoundingClientRect();
@@ -654,6 +710,7 @@
 
     root.addEventListener("pointerup", finish);
     root.addEventListener("pointercancel", function () {
+      state.panning = false;
       state.dragging = false;
       if (state.overlay) state.overlay.style.display = "none";
     });

@@ -656,6 +656,25 @@ fn merge_day_aggregates(points: &mut Vec<TimelinePoint>, rows: &[RawMeasurementR
     }
 }
 
+/// The tab to start on: restored from localStorage (written by the nav
+/// click effect below) so a browser refresh keeps the activated panel.
+fn restore_tab() -> Tab {
+    let Some(win) = web_sys::window() else {
+        return Tab::Gymnasia;
+    };
+    let Ok(Some(st)) = win.local_storage() else {
+        return Tab::Gymnasia;
+    };
+    match st.get_item("ephorix.tab") {
+        Ok(Some(label)) => Tab::ALL
+            .iter()
+            .find(|t| (**t).label() == label)
+            .copied()
+            .unwrap_or(Tab::Gymnasia),
+        _ => Tab::Gymnasia,
+    }
+}
+
 pub fn App() -> impl IntoView {
     let (token, set_token) = create_signal("ephorix-dev-1".to_string());
     // Empty = same origin (served behind the web service, /api proxied to
@@ -729,7 +748,15 @@ pub fn App() -> impl IntoView {
             }
         });
     };
-    let (current_tab, set_current_tab) = create_signal(Tab::Gymnasia);
+    let (current_tab, set_current_tab) = create_signal(restore_tab());
+    // Keep the activated tab across refreshes: write it to localStorage on
+    // every change (init reads it back via restore_tab above).
+    create_effect(move |_| {
+        let t = current_tab.get();
+        let Some(win) = web_sys::window() else { return; };
+        let Ok(Some(st)) = win.local_storage() else { return; };
+        let _ = st.set_item("ephorix.tab", t.label());
+    });
     // Tap-to-flip for the wordmark: hover doesn't exist on touch devices, so
     // the h1 click handler toggles the `flip` class (styled in style.css).
     let (brand_flip, set_brand_flip) = create_signal(false);
@@ -2412,7 +2439,13 @@ pub fn App() -> impl IntoView {
                                 <select on:change=move |ev| set_selected_type.set(option_value(&ev))>
                                     <option value="">"UNDEFINED"</option>
                                     <For each=move || types.get() key=|t| t.id.clone() let:t>
-                                        <option value=t.id.clone()>{t.name.clone()}</option>
+                                        {move || {
+                                            let cur = types.get()
+                                                .into_iter()
+                                                .find(|x| x.id == t.id)
+                                                .unwrap_or_else(|| t.clone());
+                                            view! { <option value=cur.id.clone()>{cur.name.clone()}</option> }
+                                        }}
                                     </For>
                                 </select>
                             </div>
@@ -2466,11 +2499,20 @@ pub fn App() -> impl IntoView {
                                 <ul class="sidebar-list">
                                     <For each=move || types.get() key=|t| t.id.clone() let:t>
                                         {move || {
-                                            let tid = t.id.clone();
+                                            // Re-read the CURRENT entry by id: keyed <For> keeps the
+                                            // stale item view when the list updates, so a saved edit
+                                            // (name/color/category) would otherwise only appear after
+                                            // a full refresh. Reading types.get() here makes the row
+                                            // re-render when the list changes.
+                                            let cur = types.get()
+                                                .into_iter()
+                                                .find(|x| x.id == t.id)
+                                                .unwrap_or_else(|| t.clone());
+                                            let tid = cur.id.clone();
                                             let tid_click = tid.clone();
-                                            let tname = t.name.clone();
-                                            let tcolor = t.color_code.clone();
-                                            let tcat = t.category.clone();
+                                            let tname = cur.name.clone();
+                                            let tcolor = cur.color_code.clone();
+                                            let tcat = cur.category.clone();
                                             view! {
                                                 <li class="sidebar-item" class:on=move || selected_id.get().as_deref() == Some(tid.as_str()) on:click=move |_| set_selected_id.set(Some(tid_click.clone()))>
                                                     <span class="dot" style=format!("background:{tcolor}")></span>

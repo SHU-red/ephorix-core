@@ -630,6 +630,10 @@ pub fn TimelineChart(
                     <span class="legend-name">"Active kcal"</span>
                     <span class="legend-unit">"kcal"</span>
                 </div>
+                <div class="legend-item">
+                    <span class="legend-swatch" style="background:rgba(144,164,174,0.45)"></span>
+                    <span class="legend-name">"SA · SO — weekend"</span>
+                </div>
             </aside>
         </div>
         <div class="workout-row">
