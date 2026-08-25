@@ -28,8 +28,8 @@ use crate::{
 // Full = 300 (the 300 Spartans). Recharge from sleep, discharge from activity
 // and stress (an HR-elevation strain score — no HRV on the watch).
 
-const RECHARGE_PER_HOUR: f64 = 60.0;
-const MAX_RECHARGE: f64 = 300.0;
+const RECHARGE_PER_HOUR: f64 = 12.0; // ~100 pts for a typical 8h night (full = 300)
+const MAX_RECHARGE: f64 = 150.0;     // a long night tops out at half a tank
 const DRAIN_PER_KCAL: f64 = 0.12;
 const DRAIN_PER_10K_STEPS: f64 = 50.0;
 const DRAIN_PER_STRESS: f64 = 0.5; // stress → battery points (300 stress ≈ 150 drain/hr)
@@ -37,6 +37,18 @@ const DRAIN_PER_MOVE: f64 = 0.005; // movement intensity (au) → battery points
 const STRESS_RESTING_HR: f64 = 55.0; // bpm below which stress is 0
 const STRESS_FULL_HR: f64 = 120.0;   // bpm at which the daily 0..100 stress saturates
 const STRESS_SERIES_FULL_HR: f64 = 175.0; // bpm at which series stress is 300 (0..300 scale)
+/// Stateless daily battery: full tank (300) + the night's recharge − the
+/// day's activity drain and HR-strain drain, clamped to 0..300. Kept pure
+/// so the calibration can be unit-tested.
+fn daily_battery_score(recharge: f64, drain: f64, stress_drain: f64) -> f64 {
+    (300.0 + recharge - drain - stress_drain).clamp(0.0, 300.0)
+}
+
+/// Stateless daily readiness: full 300 − baseline-normalized stress and
+/// activity drains + sleep recharge. Same shape as [`daily_battery_score`].
+fn readiness_score(recharge: f64, stress_drain: f64, activity_drain: f64) -> f64 {
+    (READINESS_FULL - stress_drain - activity_drain + recharge).clamp(0.0, READINESS_FULL)
+}
 
 #[derive(Debug, sqlx::FromRow)]
 struct DayAggregate {
@@ -105,7 +117,7 @@ pub async fn body_battery(
             0.0
         };
         let stress_drain = stress * DRAIN_PER_STRESS;
-        let score = (300.0 + recharge - drain - stress_drain).clamp(0.0, 300.0);
+        let score = daily_battery_score(recharge, drain, stress_drain);
         points.push(BodyEnergyPoint { day: d.day, score, recharge, drain, stress });
         sqlx::query(
             "INSERT INTO body_energy (user_id, day, score, recharge, drain, stress, updated_at)
@@ -607,7 +619,7 @@ fn validate_range(q: &RangeQuery) -> ApiResult<()> {
 
 const BASELINE_WINDOW_DAYS: i64 = 90;
 const READINESS_FULL: f64 = 300.0;
-const RECHARGE_PER_P50: f64 = 120.0; // points per 1.0x of the user's p50 sleep
+const RECHARGE_PER_P50: f64 = 60.0; // points per 1.0x of the user's p50 sleep (drains outpace typical recharge)
 const RECHARGE_CAP_RATIO: f64 = 1.5; // sleep above 1.5x p50 earns no more points
 const STRESS_DRAIN_MAX: f64 = 100.0;
 const ACTIVITY_DRAIN_MAX: f64 = 80.0;
@@ -840,8 +852,7 @@ pub async fn readiness(
         };
         let stress_drain = (stress / stress_p90).clamp(0.0, 1.0) * STRESS_DRAIN_MAX;
         let activity_drain = (kcal / kcal_p90).clamp(0.0, 1.0) * ACTIVITY_DRAIN_MAX;
-        let score = (READINESS_FULL - stress_drain - activity_drain + recharge)
-            .clamp(0.0, READINESS_FULL);
+        let score = readiness_score(recharge, stress_drain, activity_drain);
 
         let day = d;
         days.push(json!({
@@ -862,4 +873,40 @@ pub async fn readiness(
     }
 
     Ok(Json(json!({ "days": days })))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Calibration guards: with real user day values (sleep 6.4-12.7 h,
+    // drain 40-134, stress 11-59) the daily battery must move below full on
+    // normal days instead of pinning at 300 (the pre-fix saturation), yet
+    // recover to full on light days.
+    #[test]
+    fn daily_battery_responds_to_typical_day() {
+        // Typical weekday: 8 h sleep, ~500 kcal, ~8k steps, avg HR ~85.
+        let recharge = (8.0 * RECHARGE_PER_HOUR).min(MAX_RECHARGE);
+        let drain = 500.0 * DRAIN_PER_KCAL + 8000.0 / 10_000.0 * DRAIN_PER_10K_STEPS;
+        let stress = ((85.0 - STRESS_RESTING_HR) / (STRESS_FULL_HR - STRESS_RESTING_HR) * 100.0)
+            .clamp(0.0, 100.0);
+        let score = daily_battery_score(recharge, drain, stress * DRAIN_PER_STRESS);
+        assert!(score < 300.0, "typical day must not pin at full: {score}");
+        assert!(score > 200.0, "typical day must not crater: {score}");
+    }
+
+    #[test]
+    fn daily_battery_recovers_on_light_day() {
+        // Light day: 8 h sleep, ~200 kcal, ~3k steps, low stress.
+        let recharge = (8.0 * RECHARGE_PER_HOUR).min(MAX_RECHARGE);
+        let drain = 200.0 * DRAIN_PER_KCAL + 3000.0 / 10_000.0 * DRAIN_PER_10K_STEPS;
+        let score = daily_battery_score(recharge, drain, 5.0 * DRAIN_PER_STRESS);
+        assert_eq!(score, 300.0);
+    }
+
+    #[test]
+    fn readiness_responds_to_typical_day() {
+        // 1.0x p50 sleep, stress at half p90, kcal at half p90.
+        let score = readiness_score(RECHARGE_PER_P50, 50.0, 40.0);
+        assert!(score < 300.0 && score > 200.0, "readiness pinned at {score}");
+    }
 }

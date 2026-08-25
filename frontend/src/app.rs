@@ -3858,8 +3858,10 @@ fn AgogeConfigForm(
     let (category, set_category) = create_signal(initial_category.clone());
     let (hr_interval, set_hr_interval) = create_signal(ty.as_ref().map(|t| t.hr_sampling_interval).unwrap_or(60));
     // HR sampling choices (seconds), the same set as the watch Auto Push menu.
-    let hr_choices: [(i64, &str); 7] = [
+    let hr_choices: [(i64, &str); 9] = [
         (0, "OFF (OS automatic)"),
+        (10, "10 sec — max HR (battery-heavy)"),
+        (30, "30 sec"),
         (60, "1 min — max HR quality"),
         (300, "5 min"),
         (600, "10 min"),
