@@ -18,6 +18,9 @@ pub struct AgogeType {
     /// Heart-rate sampling interval in seconds while an Agoge of this type
     /// runs (0 = OS automatic). Mirrored to the watch with each type list.
     pub hr_sampling_interval: i32,
+    /// Web-editable display order (0 = first). Maintained by
+    /// POST /api/v1/agoge-types/reorder; new types append at MAX+1.
+    pub sort_order: i32,
     pub created_at: DateTime<Utc>,
 }
 

@@ -2,6 +2,7 @@ pub mod actions;
 pub mod agoge_sessions;
 pub mod agoge_types;
 pub mod ai;
+pub mod brand;
 pub mod events;
 pub mod health;
 pub mod import;
@@ -59,6 +60,10 @@ pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
         .route(
             "/api/v1/agoge-types",
             get(agoge_types::list).post(agoge_types::create),
+        )
+        .route(
+            "/api/v1/agoge-types/reorder",
+            post(agoge_types::reorder),
         )
         .route(
             "/api/v1/agoge-types/{id}",
@@ -131,6 +136,9 @@ pub fn app(pool: PgPool, cors_origins: Vec<String>) -> Router {
 
     Router::new()
         .route("/healthz", get(healthz))
+        // Public brand assets (no auth): the app icon, hotlinkable from the
+        // web app and external surfaces.
+        .route("/api/brand/icon.svg", get(brand::icon_svg))
         .merge(api)
         .with_state(pool)
         .layer(cors)

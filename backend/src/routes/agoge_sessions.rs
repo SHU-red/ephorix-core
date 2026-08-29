@@ -133,6 +133,8 @@ pub struct UpdateSession {
     #[serde(default)]
     pub end_time: Option<DateTime<Utc>>,
     #[serde(default)]
+    pub start_time: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub status: Option<String>,
 }
 
@@ -153,6 +155,7 @@ pub async fn update(
     .ok_or_else(|| ApiError::NotFound(format!("session {id} not found")))?;
 
     let end_time = body.end_time.or(current.end_time);
+    let start_time = body.start_time.or(Some(current.start_time)).unwrap();
     let status = body
         .status
         .clone()
@@ -160,19 +163,21 @@ pub async fn update(
     if status != "active" && status != "closed" {
         return Err(ApiError::BadRequest("status must be 'active' or 'closed'".to_string()));
     }
-    validate_times(current.start_time, end_time)?;
+    validate_times(start_time, end_time)?;
 
     let updated = sqlx::query_as::<_, AgogeSession>(
         "UPDATE agoge_sessions
-         SET type_id = COALESCE($3, type_id),
-             end_time = $4,
-             status = $5,
+         SET start_time = $3,
+             type_id = COALESCE($4, type_id),
+             end_time = $5,
+             status = $6,
              updated_at = now()
          WHERE id = $1 AND user_id = $2
          RETURNING *",
     )
     .bind(id)
     .bind(user.0)
+    .bind(start_time)
     .bind(body.type_id)
     .bind(end_time)
     .bind(status)
@@ -611,4 +616,25 @@ fn validate_times(start: DateTime<Utc>, end: Option<DateTime<Utc>>) -> ApiResult
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_times_accepts_valid_ranges() {
+        let start = Utc::now();
+        assert!(validate_times(start, None).is_ok());
+        assert!(validate_times(start, Some(start + chrono::Duration::minutes(30))).is_ok());
+        // A closed-at-instant session (end == start) is legal.
+        assert!(validate_times(start, Some(start)).is_ok());
+    }
+
+    #[test]
+    fn validate_times_rejects_end_before_start() {
+        let start = Utc::now();
+        let err = validate_times(start, Some(start - chrono::Duration::seconds(1))).unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)));
+    }
 }

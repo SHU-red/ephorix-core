@@ -16,7 +16,7 @@ use crate::{
 
 pub async fn list(State(pool): State<PgPool>) -> ApiResult<Json<serde_json::Value>> {
     let types: Vec<AgogeType> =
-        sqlx::query_as("SELECT * FROM agoge_types ORDER BY name").fetch_all(&pool).await?;
+        sqlx::query_as("SELECT * FROM agoge_types ORDER BY sort_order ASC, name ASC").fetch_all(&pool).await?;
     Ok(Json(json!({ "types": types })))
 }
 
@@ -80,8 +80,9 @@ pub async fn create(
     let config = normalize_config(body.config);
     let hr_interval = normalize_hr_interval(body.hr_sampling_interval).unwrap_or(60);
     let ty = sqlx::query_as::<_, AgogeType>(
-        "INSERT INTO agoge_types (name, color_code, icon, category, config, hr_sampling_interval)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        "INSERT INTO agoge_types (name, color_code, icon, category, config, hr_sampling_interval, sort_order)
+         SELECT $1, $2, $3, $4, $5, $6, COALESCE(MAX(sort_order) + 1, 0)
+         FROM agoge_types
          RETURNING *",
     )
     .bind(name)
@@ -139,6 +140,51 @@ pub async fn delete(
         return Err(ApiError::NotFound(format!("agoge type {id} not found")));
     }
     Ok(Json(json!({ "deleted": id })))
+}
+
+/// Bulk reorder: each entry overwrites that type's sort_order. Applied in
+/// one transaction so a partial failure leaves no half-applied ordering.
+/// Shared reference data — same no-user-scope posture as the other
+/// agoge_types handlers. Returns the updated list in display order.
+#[derive(Debug, Deserialize)]
+pub struct ReorderTypes {
+    pub order: Vec<ReorderEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReorderEntry {
+    pub id: Uuid,
+    pub sort_order: i64,
+}
+
+pub async fn reorder(
+    State(pool): State<PgPool>,
+    Json(body): Json<ReorderTypes>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.order.is_empty() {
+        return Err(ApiError::BadRequest("order must not be empty".to_string()));
+    }
+    let mut tx = pool.begin().await?;
+    for entry in &body.order {
+        let res = sqlx::query("UPDATE agoge_types SET sort_order = $1 WHERE id = $2")
+            .bind(entry.sort_order)
+            .bind(entry.id)
+            .execute(&mut *tx)
+            .await?;
+        if res.rows_affected() == 0 {
+            return Err(ApiError::NotFound(format!(
+                "agoge type {} not found",
+                entry.id
+            )));
+        }
+    }
+    tx.commit().await?;
+    let types: Vec<AgogeType> =
+        sqlx::query_as("SELECT * FROM agoge_types ORDER BY sort_order ASC, name ASC")
+            .fetch_all(&pool)
+            .await?;
+    Ok(Json(json!({ "types": types })))
 }
 
 #[cfg(test)]
