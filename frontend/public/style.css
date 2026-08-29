@@ -1441,36 +1441,47 @@ html, body { overflow-x: clip; }
    under the strip row (desktop row layout; mobile column layout stacks it
    naturally as the last child). */
 .workout-row { flex-wrap: wrap; }
+/* Two-step edge editing: the SELECTED workout block shows two grab knobs at
+   its top corners, deliberately poking OUTSIDE the block so a plain click on
+   the block can never start a drag — the user must explicitly grab a knob.
+   These are the only draggable elements (the drag handlers require
+   `.slot-handle` as the pointerdown target). */
 .slot-handle {
   position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 10px;
-  cursor: ew-resize;
-  z-index: 2;
-  background: transparent;
+  width: 14px;
+  height: 14px;
+  top: -8px;
+  cursor: grab;
+  z-index: 3;
+  background: #050505;
+  border: 2px solid #f5f5f5;
+  border-radius: 3px;
+  box-shadow: 0 0 5px rgba(0, 0, 0, 0.8);
   user-select: none;
   touch-action: none;
+  transition: border-color 0.12s ease, transform 0.12s ease;
 }
-/* Subtle vertical bar revealed on hover so the hit area reads as draggable. */
+.slot-handle:hover {
+  border-color: #e53935;
+  transform: scale(1.2);
+}
+.slot-handle:active {
+  cursor: grabbing;
+}
+/* Grip dot in the knob center. */
 .slot-handle::after {
   content: "";
   position: absolute;
-  top: 12%;
-  bottom: 12%;
   left: 50%;
-  width: 3px;
-  transform: translateX(-50%);
-  border-radius: 2px;
-  background: transparent;
-  box-shadow: 0 0 2px rgba(0, 0, 0, 0.5);
-  transition: background 0.12s ease;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
 }
-.slot-handle:hover::after {
-  background: rgba(255, 255, 255, 0.85);
-}
-.slot-handle-left { left: 0; }
-.slot-handle-right { right: 0; }
+.slot-handle-corner-left { left: -8px; }
+.slot-handle-corner-right { right: -8px; }
 /* Muted one-line hint under the strip. */
 .workout-hint {
   flex: 1 1 100%;

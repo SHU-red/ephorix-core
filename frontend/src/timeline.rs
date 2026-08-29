@@ -60,6 +60,8 @@ extern "C" {
     fn ephorix_on_drag(id: u32, cb: &js_sys::Function);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = onClick)]
     fn ephorix_on_click(id: u32, cb: &js_sys::Function);
+    #[wasm_bindgen(js_namespace = EphoriX, js_name = onWheelZoom)]
+    fn ephorix_on_wheel_zoom(id: u32, cb: &js_sys::Function);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = onScaleChange)]
     fn ephorix_on_scale_change(id: u32, cb: &js_sys::Function);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = zoomTo)]
@@ -269,6 +271,17 @@ pub fn TimelineChart(
             }) as Box<dyn FnMut(String)>);
             ephorix_on_drag(id, drag_cb.as_ref().unchecked_ref());
             drag_cb.forget();
+
+            // Wheel-zoom: the bridge fires the new x-domain after a wheel
+            // zoom; refetch data bucketed to it (same path as a drag-zoom,
+            // preserving the just-applied zoom).
+            let wheel_cb = Closure::wrap(Box::new(move |json: String| {
+                let Ok(r) = serde_json::from_str::<DragRect>(&json) else { return };
+                preserve_zoom.set(true);
+                on_zoom.call(Some((r.x0.min(r.x1), r.x0.max(r.x1))));
+            }) as Box<dyn FnMut(String)>);
+            ephorix_on_wheel_zoom(id, wheel_cb.as_ref().unchecked_ref());
+            wheel_cb.forget();
 
             let cur_cb = Closure::wrap(Box::new(move |ts: Option<f64>| {
                 cursor.set(ts);
@@ -798,7 +811,7 @@ pub fn TimelineChart(
                     <span class="legend-name">"WORKOUTS"</span>
                 </div>
             </aside>
-            <div class="workout-hint">"CLICK A BLOCK TO SELECT · DRAG ITS CORNER KNOBS TO MOVE START/END · SCROLL CHARTS TO PAN TIME"</div>
+            <div class="workout-hint">"CLICK A BLOCK TO SELECT · DRAG ITS CORNER KNOBS TO MOVE START/END · SCROLL TO ZOOM · MIDDLE-DRAG TO PAN"</div>
         </div>
         <div class="chart-row">
             <div class="battery-wrap">

@@ -546,6 +546,8 @@
     var state = {
       dragCb: null,
       clickCb: null,
+      zoomCb: null,
+      zoomFull: null,
       overlay: null,
       dragging: false,
       startX: 0,
@@ -715,13 +717,16 @@
       if (state.overlay) state.overlay.style.display = "none";
     });
 
-    // Wheel / trackpad scroll pans the x-axis in time direction while the
-    // pointer is over the chart: deltaX pans directly (horizontal trackpad),
-    // deltaY pans time too so a plain mouse wheel works. Both linked charts
-    // move together via the group; the view is clamped to the loaded data
-    // extent. passive:false lets preventDefault stop the page from scrolling.
+    // Wheel / trackpad scroll ZOOMS the x-axis centered at the cursor while
+    // the pointer is over the chart (wheel up = in, down = out; horizontal
+    // trackpad scroll zooms too). Both linked charts move together via the
+    // group; zoom-out is clamped to the INITIAL loaded extent (cached on
+    // first sight, so the zoom-in refetch cannot shrink it); the zoom fires
+    // the wheel-zoom callback so the app refetches data bucketed to the new
+    // domain. Panning stays on the middle-button drag. passive:false lets
+    // preventDefault stop the page from scrolling.
     root.addEventListener("wheel", function (e) {
-      if (state.panning || state.dragging) return; // never pan mid-drag
+      if (state.panning || state.dragging) return;
       var xs = c.scales.x;
       if (xs.min == null || xs.max == null) return;
       var span = xs.max - xs.min;
@@ -731,26 +736,43 @@
       var px = delta;
       if (e.deltaMode === 1) px *= 16; // lines (Firefox)
       else if (e.deltaMode === 2) px *= 120; // pages
-      var msPerPx = span / c.bbox.width;
-      var shift = px * msPerPx;
-      var lo = xs.min + shift;
-      var hi = xs.max + shift;
+      var factor = Math.exp(px * 0.002); // <1 zooms in, >1 zooms out
+      var r = root.getBoundingClientRect();
+      var cx = c.posToVal(e.clientX - r.left - c.bbox.left, "x");
+      if (!isFinite(cx)) cx = (xs.min + xs.max) / 2;
+      var lo = cx - (cx - xs.min) * factor;
+      var hi = cx + (xs.max - cx) * factor;
       var g = groupOf(id);
-      var full = g && g.full ? g.full : null;
+      var full = state.zoomFull;
       if (!full) {
-        var x0 = c.data && c.data[0];
-        if (x0 && x0.length) full = [x0[0], x0[x0.length - 1]];
+        full = g && g.full ? g.full : null;
+        if (!full) {
+          var x0 = c.data && c.data[0];
+          if (x0 && x0.length) full = [x0[0], x0[x0.length - 1]];
+        }
+        if (full) state.zoomFull = full;
       }
       if (full) {
-        if (lo < full[0]) { hi -= lo - full[0]; lo = full[0]; }
-        if (hi > full[1]) { lo -= hi - full[1]; hi = full[1]; }
+        // Zooming out at/beyond the full extent: snap back to exactly full
+        // (a per-edge clamp would overshoot and leave empty space).
+        if (hi - lo >= full[1] - full[0]) {
+          lo = full[0];
+          hi = full[1];
+        } else {
+          if (lo < full[0]) { hi -= lo - full[0]; lo = full[0]; }
+          if (hi > full[1]) { lo -= hi - full[1]; hi = full[1]; }
+        }
       }
-      if (lo === xs.min && hi === xs.max) return; // already at an edge
+      if (hi - lo < 1) return; // min zoom guard
+      if (lo === xs.min && hi === xs.max) return; // no movement (at the extent)
       if (g) {
         setGroupX(g, lo, hi);
       } else {
         c.setScale("x", { min: lo, max: hi });
         fireScaleChange(id);
+      }
+      if (state.zoomCb) {
+        state.zoomCb(JSON.stringify({ x0: lo, x1: hi, y0: 0, y1: 0, dir: "x" }));
       }
       e.preventDefault();
     }, { passive: false });
@@ -761,6 +783,13 @@
   function onDrag(id, cb) {
     var s = ensureInteraction(id);
     if (s) s.dragCb = cb;
+  }
+
+  /* Wheel-zoom: fired with the new x-domain after a wheel zoom so the app
+     can refetch data bucketed to it (same shape as the drag callback). */
+  function onWheelZoom(id, cb) {
+    var s = ensureInteraction(id);
+    if (s) s.zoomCb = cb;
   }
 
   function onClick(id, cb) {
@@ -851,6 +880,7 @@
     destroy: destroy,
     onDrag: onDrag,
     onClick: onClick,
+    onWheelZoom: onWheelZoom,
     onScaleChange: onScaleChange,
     zoomTo: zoomTo,
     setZoomMode: setZoomMode,
