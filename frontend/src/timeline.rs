@@ -68,8 +68,13 @@ extern "C" {
     fn ephorix_on_cursor(id: u32, cb: &js_sys::Function);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = valToPos)]
     fn ephorix_val_to_pos(id: u32, val: f64) -> f64;
+    #[wasm_bindgen(js_namespace = EphoriX, js_name = posToVal)]
+    fn ephorix_pos_to_val(id: u32, x: f64) -> f64;
     #[wasm_bindgen(js_namespace = EphoriX, js_name = plotBBox)]
     fn ephorix_plot_bbox(id: u32) -> String;
+
+    #[wasm_bindgen(js_namespace = EphoriX, js_name = canvasRect)]
+    fn ephorix_canvas_rect(id: u32) -> String;
     #[wasm_bindgen(js_namespace = EphoriX, js_name = clearSelection)]
     fn ephorix_clear_selection(id: u32);
     #[wasm_bindgen(js_namespace = EphoriX, js_name = resetZoom)]
@@ -98,7 +103,6 @@ struct DragRect {
     y1: f64,
     dir: String,
 }
-
 /// Plot-relative [left, width] px for a time range on chart `id`, clamped to
 /// the visible plot area (valToPos space, matching `ephorix_plot_bbox`).
 /// None when the chart isn't ready, has no plot area, or the range is
@@ -164,6 +168,9 @@ pub fn TimelineChart(
     on_zoom: Callback<Option<(f64, f64)>>,
     on_ready: Callback<u32>,
     on_session_click: Callback<String>,
+    /// Fired when the user finishes dragging a workout slot edge:
+    /// `(session_id, "start" | "end", unix_ms)` with the new edge time.
+    on_session_edit: Callback<(String, String, f64)>,
 ) -> impl IntoView {
     let chart_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let overlay_ref: NodeRef<leptos::html::Div> = create_node_ref();
@@ -370,7 +377,7 @@ pub fn TimelineChart(
         let ty = types.get();
         let _ = zoom_version.get();
         if let Some(strip) = workout_ref.get() {
-            render_workout_strip(&strip, id, &sess, &ty);
+            render_workout_strip(&strip, id, &sess, &ty, on_session_edit);
         }
     });
 
@@ -500,10 +507,15 @@ pub fn TimelineChart(
     // Slot/marker click: resolve the nearest [data-session-id] ancestor and
     // hand the session id to the parent for inline editing.
     let on_marker_click = move |ev: web_sys::MouseEvent| {
-        let hit = ev
-            .target()
-            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-            .and_then(|el| el.closest("[data-session-id]").ok().flatten());
+        // Slot-edge handles resize the slot; a drag-release would otherwise
+        // bubble a click to the slot and open the session editor.
+        let tgt = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+        if let Some(t) = &tgt {
+            if t.closest(".slot-handle").ok().flatten().is_some() {
+                return;
+            }
+        }
+        let hit = tgt.and_then(|el| el.closest("[data-session-id]").ok().flatten());
         if let Some(el) = hit {
             if let Some(sid) = el.get_attribute("data-session-id") {
                 ev.stop_propagation();
@@ -599,6 +611,143 @@ pub fn TimelineChart(
             }
         }
     };
+    // Workout slot edge drag. Delegated on the workout ROW (the strip's
+    // pointermove already belongs to the hover popup): pointerdown on a
+    // .slot-handle captures the pointer and records the drag; pointermove
+    // resizes the slot live by mapping the pointer's plot-relative x back to
+    // time via ephorix_pos_to_val (the inverse of the render-time valToPos
+    // positioning); pointerup commits the new edge through on_session_edit —
+    // the sessions effect then re-renders the strip from the updated signal.
+    // Drag state lives on the SLOT element itself (data-drag-* attributes) —
+    // deliberately no shared mutable cell: pointer-capture retargeting makes
+    // handler reentrancy easy to trip with a RefCell.
+    let on_slot_drag_down = {
+        move |ev: web_sys::PointerEvent| {
+            if ev.button() != 0 {
+                return; // primary button only
+            }
+            let Some(handle) = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) else { return };
+            if handle.closest(".slot-handle").ok().flatten().is_none() {
+                return;
+            }
+            let Some(side) = handle.get_attribute("data-side") else { return };
+            let Some(slot) = handle.closest("[data-session-id]").ok().flatten() else { return };
+            let Some(session_id) = slot.get_attribute("data-session-id") else { return };
+            let id = chart_id.get();
+            if id == 0 {
+                return;
+            }
+            let bbox: BBox = serde_json::from_str(&ephorix_plot_bbox(id))
+                .unwrap_or(BBox { left: 0.0, top: 0.0, width: 0.0, height: 0.0 });
+            if bbox.width <= 0.0 {
+                return;
+            }
+            // The edge we are NOT dragging stays fixed; derive it from the
+            // session data exactly like render_workout_strip does (valToPos +
+            // visible-domain clamp).
+            let sess = sessions.get();
+            let Some(s) = sess.iter().find(|s| s.id == session_id) else { return };
+            let Some(from) = ms_from_iso(&s.start_time) else { return };
+            let to = s.end_time.as_deref().and_then(ms_from_iso).unwrap_or(js_sys::Date::now());
+            let fixed_ts = if side == "start" { to } else { from };
+            let fixed_px = ephorix_val_to_pos(id, fixed_ts).clamp(0.0, bbox.width);
+            let _ = slot.set_attribute("data-drag-side", &side);
+            let _ = slot.set_attribute("data-drag-fixed", &format!("{fixed_px}"));
+            let _ = slot.set_attribute("data-drag-width", &format!("{}", bbox.width));
+            let _ = handle.set_pointer_capture(ev.pointer_id());
+            ev.prevent_default();
+            ev.stop_propagation();
+        }
+    };
+    let on_slot_drag_move = {
+        let chart_id = chart_id.clone();
+        move |ev: web_sys::PointerEvent| {
+            let Some(slot) = ev.target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .and_then(|t| t.closest("[data-drag-side]").ok().flatten()) else { return };
+            let Some(side) = slot.get_attribute("data-drag-side") else { return };
+            let Ok(fixed_px) = slot.get_attribute("data-drag-fixed").unwrap_or_default().parse::<f64>() else { return };
+            let Ok(width) = slot.get_attribute("data-drag-width").unwrap_or_default().parse::<f64>() else { return };
+            let id = chart_id.get();
+            if id == 0 {
+                return;
+            }
+            let rect: BBox = serde_json::from_str(&ephorix_canvas_rect(id))
+                .unwrap_or(BBox { left: 0.0, top: 0.0, width: 0.0, height: 0.0 });
+            let px = (ev.client_x() as f64 - rect.left).clamp(0.0, width);
+            // Clamp against the fixed edge so start stays < end.
+            let (left, w) = if side == "start" {
+                let l = px.min(fixed_px - 1.0).max(0.0);
+                (l, fixed_px - l)
+            } else {
+                let r = px.max(fixed_px + 1.0).min(width);
+                (fixed_px, r - fixed_px)
+            };
+            let Ok(el) = slot.dyn_into::<web_sys::HtmlDivElement>() else { return };
+            let css = el.style();
+            let _ = css.set_property("left", &format!("{left}px"));
+            let _ = css.set_property("width", &format!("{w}px"));
+            ev.prevent_default();
+        }
+    };
+    let on_slot_drag_up = {
+        let chart_id = chart_id.clone();
+        move |ev: web_sys::PointerEvent| {
+            let Some(slot) = ev.target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .and_then(|t| t.closest("[data-drag-side]").ok().flatten()) else { return };
+            let Some(side) = slot.get_attribute("data-drag-side") else { return };
+            let Ok(fixed_px) = slot.get_attribute("data-drag-fixed").unwrap_or_default().parse::<f64>() else { return };
+            let Ok(width) = slot.get_attribute("data-drag-width").unwrap_or_default().parse::<f64>() else { return };
+            let Some(session_id) = slot.get_attribute("data-session-id") else { return };
+            let id = chart_id.get();
+            if id == 0 {
+                return;
+            }
+            let rect: BBox = serde_json::from_str(&ephorix_canvas_rect(id))
+                .unwrap_or(BBox { left: 0.0, top: 0.0, width: 0.0, height: 0.0 });
+            let px = (ev.client_x() as f64 - rect.left).clamp(0.0, width);
+            // Same edge-clamp as the move handler, so the committed time
+            // always keeps start < end and stays inside the visible domain.
+            let (left, w) = if side == "start" {
+                let l = px.min(fixed_px - 1.0).max(0.0);
+                (l, fixed_px - l)
+            } else {
+                let r = px.max(fixed_px + 1.0).min(width);
+                (fixed_px, r - fixed_px)
+            };
+            // Snap the preview to the committed position, then hand the new
+            // edge time up; the parent updates the sessions signal and the
+            // strip effect re-renders the slot to the same geometry.
+            let Ok(el) = slot.clone().dyn_into::<web_sys::HtmlDivElement>() else { return };
+            let css = el.style();
+            let _ = css.set_property("left", &format!("{left}px"));
+            let _ = css.set_property("width", &format!("{w}px"));
+            let edge_px = if side == "start" { left } else { left + w };
+            let ts = ephorix_pos_to_val(id, edge_px);
+            let _ = slot.remove_attribute("data-drag-side");
+            on_session_edit.call((session_id, side, ts));
+        }
+    };
+    let on_slot_drag_cancel = {
+        let chart_id = chart_id.clone();
+        let workout_ref = workout_ref.clone();
+        move |ev: web_sys::PointerEvent| {
+            // Aborted drag (pointer capture lost): drop the drag state and
+            // re-render the strip to clear the live preview.
+            if let Some(slot) = ev.target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .and_then(|t| t.closest("[data-drag-side]").ok().flatten()) {
+                let _ = slot.remove_attribute("data-drag-side");
+            }
+            let id = chart_id.get();
+            if id != 0 {
+                if let Some(strip) = workout_ref.get() {
+                    render_workout_strip(&strip, id, &sessions.get(), &types.get(), on_session_edit);
+                }
+            }
+        }
+    };
 
     view! {
         <div class="chart-row">
@@ -636,7 +785,7 @@ pub fn TimelineChart(
                 </div>
             </aside>
         </div>
-        <div class="workout-row">
+        <div class="workout-row" on:pointerdown=on_slot_drag_down on:pointermove=on_slot_drag_move on:pointerup=on_slot_drag_up on:pointercancel=on_slot_drag_cancel>
             <div class="workout-gutter"></div>
             <div node_ref=workout_ref class="workout-strip" on:click=on_marker_click on:pointerenter=on_workout_popup.clone() on:pointermove=on_workout_popup.clone() on:pointerleave=on_workout_popup_leave.clone()>
                 <div node_ref=band_strip_ref class="sel-band"></div>
@@ -648,6 +797,7 @@ pub fn TimelineChart(
                     <span class="legend-name">"WORKOUTS"</span>
                 </div>
             </aside>
+            <div class="workout-hint">"DRAG BLOCK EDGES TO MOVE START/END · CLICK FOR DETAILS"</div>
         </div>
         <div class="chart-row">
             <div class="battery-wrap">
@@ -983,12 +1133,15 @@ fn render_workout_popup(popup: &web_sys::HtmlDivElement, payload: &str) {
 /// glyph (`.workout-slot-icon`); narrow slots (<44px) hide the label and
 /// center the glyph. Rich hover details travel as JSON in `data-popup`
 /// (replaces the native title) and are rendered by the delegated pointer
-/// handlers in `TimelineChart`.
+/// handlers in `TimelineChart`. Each slot also carries two edge-resize
+/// handles (`.slot-handle`) that the same delegated handlers drive; the
+/// dragged edge is committed through the component's `on_session_edit`.
 fn render_workout_strip(
     container: &leptos::html::HtmlElement<leptos::html::Div>,
     chart_id: u32,
     sessions: &[AgogeSession],
     types: &[AgogeType],
+    _on_session_edit: Callback<(String, String, f64)>,
 ) {
     let doc = web_sys::window().unwrap().document().unwrap();
     container.set_inner_html("");
@@ -1081,6 +1234,15 @@ fn render_workout_strip(
         let _ = label.set_attribute("style", &format!("color:{lcolor};text-shadow:{lshadow};"));
         label.set_text_content(Some(&format!("{name}  {}–{}", hhmm(from), hhmm(to))));
         let _ = el.append_child(&label);
+        // Edge-resize handles: 10px hit areas pinned to the slot's left/right
+        // edges. The delegated pointer handlers in `TimelineChart` drive the
+        // drag; `data-side` tells them which edge is being moved.
+        for (cls, side) in [("slot-handle-left", "start"), ("slot-handle-right", "end")] {
+            let handle = doc.create_element("div").unwrap();
+            let _ = handle.set_class_name(&format!("slot-handle {cls}"));
+            let _ = handle.set_attribute("data-side", side);
+            let _ = el.append_child(&handle);
+        }
         let _ = container.append_child(&el);
     }
 }

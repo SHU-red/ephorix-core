@@ -762,6 +762,14 @@
     return c ? c.valToPos(val, "x") : 0;
   }
 
+  /* Timestamp (x scale) for a plot-area-relative x px. Inverse of valToPos,
+   * used to map pointer positions back to time while dragging workout slot
+   * edges. Inner-rect space, matching valToPos / plotBBox. */
+  function posToVal(id, x) {
+    var c = charts.get(id);
+    return c ? c.posToVal(x, "x") : 0;
+  }
+
   /* Plot-area bbox in px, used to position the session overlay exactly over
    * the axes' inner area. Returned as JSON string for wasm consumption. */
   function plotBBox(id) {
@@ -774,6 +782,24 @@
       top: typeof b.top === "number" ? b.top : 0,
       width: typeof b.width === "number" ? b.width : 0,
       height: typeof b.height === "number" ? b.height : 0
+    });
+  }
+
+  /* Plot-area bbox in VIEWPORT (client) coordinates — clientX-compatible —
+   * so pointer drags on the workout strip map back to time. */
+  function canvasRect(id) {
+    var c = charts.get(id);
+    if (!c) return "{}";
+    var b = c.bbox;
+    // uPlot doesn't expose a stable `.canvas` property across versions; the
+    // root element always exists and bbox is relative to it.
+    var r = c.root.getBoundingClientRect();
+    if (!b || !r) return "{}";
+    return JSON.stringify({
+      left: r.left + b.left,
+      top: r.top + b.top,
+      width: b.width,
+      height: b.height
     });
   }
 
@@ -794,7 +820,9 @@
     getSelection: getSelection,
     clearSelection: clearSelection,
     valToPos: valToPos,
+    posToVal: posToVal,
     plotBBox: plotBBox,
+    canvasRect: canvasRect,
     _charts: charts
   };
 })(window);

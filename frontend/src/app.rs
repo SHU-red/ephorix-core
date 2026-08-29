@@ -717,6 +717,68 @@ pub fn App() -> impl IntoView {
     let (sleep, set_sleep) = create_signal(Vec::<SleepDay>::new());
     let (detections, set_detections) = create_signal(Vec::<Detection>::new());
     let (zoom_mode, set_zoom_mode) = create_signal(true);
+    // Syntaxis ledger filters: free-text (type name), type, and a date-window
+    // that defaults to the current global range (the shared sessions signal is
+    // already range-scoped by the timeline fetch; these narrow it further).
+    let (ledger_search, set_ledger_search) = create_signal(String::new());
+    let (ledger_type, set_ledger_type) = create_signal(String::new());
+    let (ledger_from, set_ledger_from) = create_signal(String::new());
+    let (ledger_to, set_ledger_to) = create_signal(String::new());
+    let ledger_range_dirty = create_rw_signal(false);
+    // Default the ledger date window to the global range presets; once the
+    // user edits either date box, stop tracking the presets.
+    create_effect(move |_| {
+        if ledger_range_dirty.get() {
+            return;
+        }
+        let days = days.get();
+        let to_ms = js_sys::Date::now();
+        let from_ms = to_ms - days as f64 * 86_400_000.0;
+        set_ledger_from.set(date_str(from_ms));
+        set_ledger_to.set(date_str(to_ms));
+    });
+    // Agoges sidebar drag-to-reorder: the type being dragged and the current
+    // drop target (the latter drives the drop-indicator highlight).
+    let drag_type_id = create_rw_signal(None::<String>);
+    let drag_over_id = create_rw_signal(None::<String>);
+    // Syntaxis ledger rows: the shared sessions signal (already range-scoped
+    // by the timeline fetch), narrowed by search / type / date filters.
+    let visible_sessions = Callback::new(move |_| {
+        let q = ledger_search.get().trim().to_lowercase();
+        let t = ledger_type.get();
+        let from = ledger_from.get();
+        let to = ledger_to.get();
+        let from_ms = if from.is_empty() { None } else { ms_from_iso(&format!("{from}T00:00:00Z")) };
+        let to_ms = if to.is_empty() { None } else { ms_from_iso(&format!("{to}T23:59:59Z")) };
+        let ts = types.get();
+        sessions.get().into_iter().filter(|s| {
+            if !t.is_empty() && s.type_id.as_deref() != Some(t.as_str()) {
+                return false;
+            }
+            if !q.is_empty() {
+                let name = s.type_id.as_ref()
+                    .and_then(|tid| ts.iter().find(|x| &x.id == tid))
+                    .map(|x| x.name.to_lowercase())
+                    .unwrap_or_default();
+                if !name.contains(&q) {
+                    return false;
+                }
+            }
+            if let Some(start) = ms_from_iso(&s.start_time) {
+                if let Some(f) = from_ms {
+                    if start < f {
+                        return false;
+                    }
+                }
+                if let Some(t2) = to_ms {
+                    if start > t2 {
+                        return false;
+                    }
+                }
+            }
+            true
+        }).collect::<Vec<_>>()
+    });
     let (ai_text, set_ai_text) = create_signal(String::new());
     let (ai_base, set_ai_base) = create_signal(String::new());
     let (ai_model, set_ai_model) = create_signal(String::new());
@@ -896,7 +958,12 @@ pub fn App() -> impl IntoView {
                 Err(e) => set_error.set(Some(e)),
             }
             match fetch_types(&base, &token).await {
-                Ok(t) => set_types.set(t),
+                Ok(mut t) => {
+                    // Backend returns types in sortOrder; sort defensively so
+                    // the sidebar renders in drag order either way.
+                    t.sort_by_key(|x| x.sort_order);
+                    set_types.set(t);
+                }
                 Err(e) => set_error.set(Some(e)),
             }
             match fetch_workouts(&base, &token, from_ms, to_ms).await {
@@ -1377,6 +1444,61 @@ pub fn App() -> impl IntoView {
             }
         });
     };
+    // One time bound ({startTime} | {endTime}) PATCH, shared by the editor's
+    // explicit HH:MM APPLY inputs and the Dashboard chart's session edit
+    // (drag a block to move it). Closes the editor and resyncs, like the
+    // DURATION override. Callback so both tabs can share it.
+    let apply_session_time = Callback::new(move |(id, field, iso): (String, String, String)| {
+        let base = base.get();
+        let token = token.get();
+        let body = if field == "start" {
+            json!({ "startTime": iso.clone() })
+        } else {
+            json!({ "endTime": iso.clone() })
+        };
+        spawn_local(async move {
+            match patch_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}"), &body).await {
+                Ok(_) => {
+                    selected_session.set(None);
+                    refresh();
+                }
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    });
+
+    // Agoges sidebar drag-to-reorder: drop moves the dragged type into the
+    // target's slot, persists via /agoge-types/reorder, then resyncs (the
+    // backend returns types sorted by sortOrder). Callback so every row can
+    // share it.
+    let on_type_drop = Callback::new(move |target: String| {
+        let Some(from) = drag_type_id.get() else {
+            return;
+        };
+        drag_over_id.set(None);
+        if from == target {
+            return;
+        }
+        let mut list = types.get();
+        let Some(from_idx) = list.iter().position(|t| t.id == from) else {
+            return;
+        };
+        let Some(to_idx) = list.iter().position(|t| t.id == target) else {
+            return;
+        };
+        let t = list.remove(from_idx);
+        list.insert(to_idx, t);
+        let order: Vec<(String, i64)> = list.iter().enumerate().map(|(i, t)| (t.id.clone(), i as i64)).collect();
+        set_types.set(list);
+        let base = base.get();
+        let token = token.get();
+        spawn_local(async move {
+            match reorder_types(&base, &token, order).await {
+                Ok(_) => refresh(),
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    });
 
 
     // -- Agoge types CRUD ----------------------------------------------------
@@ -2433,6 +2555,7 @@ pub fn App() -> impl IntoView {
                                 on_zoom=Callback::new(move |range| handle_zoom(range))
                                 on_ready=Callback::new(move |id| handle_chart_ready(id))
                                 on_session_click=Callback::new(move |sid| handle_session_click(sid))
+                                on_session_edit=Callback::new(move |(sid, field, ms)| apply_session_time.call((sid, field, iso_from_ms(ms))))
                             />
                             <div class="agoge-type-bar">
                                 <span class="agoge-type-label">"AGOGE TYPE"</span>
@@ -2449,21 +2572,6 @@ pub fn App() -> impl IntoView {
                                     </For>
                                 </select>
                             </div>
-                            <div class="session-strip">
-                                <For each=move || {
-                                    let _ = types.get();
-                                    let mut ss = sessions.get();
-                                    ss.sort_by(|a, b| {
-                                        ms_from_iso(&b.start_time)
-                                            .unwrap_or(0.0)
-                                            .partial_cmp(&ms_from_iso(&a.start_time).unwrap_or(0.0))
-                                            .unwrap_or(std::cmp::Ordering::Equal)
-                                    });
-                                    ss
-                                } key=|s| s.id.clone() let:s>
-                                    <SessionChip session=s types=types on_open=Callback::new(move |s: AgogeSession| handle_session_click(s.id.clone())) />
-                                </For>
-                            </div>
                             <Show when=move || selected_session.get().is_some() fallback=|| ()>
                                 {move || {
                                     let s = selected_session.get().unwrap();
@@ -2478,6 +2586,7 @@ pub fn App() -> impl IntoView {
                                                 on_type=Callback::new(move |t: (String, String)| save_session_type(t.0, t.1))
                                                 on_pick=Callback::new(move |f| toggle_pick(f))
                                                 on_duration=Callback::new(move |d: (String, String)| apply_duration(d.0, d.1))
+                                                on_time=Callback::new(move |(id, f, iso)| apply_session_time.call((id, f, iso)))
                                                 on_delete=Callback::new(move |id| delete_selected_session(id))
                                                 on_close=Callback::new(move |id| close_selected_session(id))
                                             />
@@ -2496,7 +2605,11 @@ pub fn App() -> impl IntoView {
                                     <span class="sidebar-title">"AGOGES"</span>
                                     <button class="btn small" on:click=move |_| set_selected_id.set(None)>"+"</button>
                                 </div>
-                                <ul class="sidebar-list">
+                                <div class="sidebar-hint">"DRAG ≡ TO REORDER — order syncs to the watch"</div>
+                                <ul class="sidebar-list" on:dragend=move |_| {
+                                    drag_type_id.set(None);
+                                    drag_over_id.set(None);
+                                }>
                                     <For each=move || types.get() key=|t| t.id.clone() let:t>
                                         {move || {
                                             // Re-read the CURRENT entry by id: keyed <For> keeps the
@@ -2510,11 +2623,31 @@ pub fn App() -> impl IntoView {
                                                 .unwrap_or_else(|| t.clone());
                                             let tid = cur.id.clone();
                                             let tid_click = tid.clone();
+                                            let tid_drag = tid.clone();
+                                            let tid_over = tid.clone();
+                                            let tid_drop = tid.clone();
+                                            let tid_ov_class = tid.clone();
                                             let tname = cur.name.clone();
                                             let tcolor = cur.color_code.clone();
                                             let tcat = cur.category.clone();
                                             view! {
-                                                <li class="sidebar-item" class:on=move || selected_id.get().as_deref() == Some(tid.as_str()) on:click=move |_| set_selected_id.set(Some(tid_click.clone()))>
+                                                <li class="sidebar-item"
+                                                    class:on=move || selected_id.get().as_deref() == Some(tid.as_str())
+                                                    class:drag-over=move || drag_over_id.get().as_deref() == Some(tid_ov_class.as_str())
+                                                    draggable="true"
+                                                    on:dragstart=move |_| {
+                                                        drag_type_id.set(Some(tid_drag.clone()));
+                                                    }
+                                                    on:dragover=move |ev| {
+                                                        ev.prevent_default();
+                                                        drag_over_id.set(Some(tid_over.clone()));
+                                                    }
+                                                    on:drop=move |ev| {
+                                                        ev.prevent_default();
+                                                        on_type_drop.call(tid_drop.clone());
+                                                    }
+                                                    on:click=move |_| set_selected_id.set(Some(tid_click.clone()))>
+                                                    <span class="drag-handle" title="DRAG TO REORDER">"≡"</span>
                                                     <span class="dot" style=format!("background:{tcolor}")></span>
                                                     <span class="si-name">{tname}</span>
                                                     <span class="si-cat">{tcat.to_uppercase()}</span>
@@ -2595,12 +2728,53 @@ pub fn App() -> impl IntoView {
                             </Show>
                         </section>
                         <section class="panel">
-                            <div class="panel-head"><h2>"AGOGE SESSIONS"</h2><span class="muted">{move || format!("{} total", sessions.get().len())}</span></div>
-                            <ul class="list">
-                                <For each=move || { let _ = types.get(); sessions.get() } key=|s| s.id.clone() let:s>
-                                    <SessionRow session=s types=types on_delete=Callback::new(move |id: String| delete_session(id)) />
-                                </For>
-                            </ul>
+                            <div class="panel-head"><h2>"ALL SESSIONS"</h2><span class="muted">"review here; drag blocks on the Dashboard to edit times"</span></div>
+                            <div class="ledger-filter">
+                                <input class="ledger-search" type="text" placeholder="SEARCH TYPE…" prop:value=move || ledger_search.get() on:input=move |ev| set_ledger_search.set(event_target_value(&ev)) />
+                                <label class="ctl">"TYPE"
+                                    <select prop:value=move || ledger_type.get() on:change=move |ev| set_ledger_type.set(event_target_value(&ev))>
+                                        <option value="">"ALL TYPES"</option>
+                                        <For each=move || types.get() key=|t| t.id.clone() let:t>
+                                            <option value=t.id.clone()>{t.name.clone()}</option>
+                                        </For>
+                                    </select>
+                                </label>
+                                <label class="ctl">"FROM"
+                                    <input type="date" prop:value=move || ledger_from.get() on:input=move |ev| { ledger_range_dirty.set(true); set_ledger_from.set(event_target_value(&ev)); } />
+                                </label>
+                                <label class="ctl">"TO"
+                                    <input type="date" prop:value=move || ledger_to.get() on:input=move |ev| { ledger_range_dirty.set(true); set_ledger_to.set(event_target_value(&ev)); } />
+                                </label>
+                            </div>
+                            <Show when=move || !visible_sessions.call(()).is_empty() fallback=|| view! { <p class="muted">"No sessions match the filters."</p> }>
+                                <ul class="list ledger">
+                                    <For each=move || visible_sessions.call(()) key=|s| s.id.clone() let:s>
+                                        <SessionRow session=s types=types on_delete=Callback::new(move |id: String| delete_session(id)) on_click=Callback::new(move |id: String| handle_session_click(id)) />
+                                    </For>
+                                </ul>
+                            </Show>
+                            <Show when=move || selected_session.get().is_some() fallback=|| ()>
+                                {move || {
+                                    let s = selected_session.get().unwrap();
+                                    view! {
+                                        <div key=s.id.clone()>
+                                            <SessionDetails
+                                                session=s
+                                                base=base.get_untracked()
+                                                token=token.get_untracked()
+                                                types=types
+                                                pick_field=pick_field
+                                                on_type=Callback::new(move |t: (String, String)| save_session_type(t.0, t.1))
+                                                on_pick=Callback::new(move |f| toggle_pick(f))
+                                                on_duration=Callback::new(move |d: (String, String)| apply_duration(d.0, d.1))
+                                                on_time=Callback::new(move |(id, f, iso)| apply_session_time.call((id, f, iso)))
+                                                on_delete=Callback::new(move |id| delete_selected_session(id))
+                                                on_close=Callback::new(move |id| close_selected_session(id))
+                                            />
+                                        </div>
+                                    }
+                                }}
+                            </Show>
                         </section>
                     }.into_view(),
 
@@ -3831,15 +4005,24 @@ fn option_value(ev: &web_sys::Event) -> Option<String> {
     if val.is_empty() { None } else { Some(val) }
 }
 
-/// One session row. Fields are computed eagerly per For iteration; the
-/// sessions For re-subscribes to `types` so type CRUD refreshes the rows.
+/// One ledger row: dot, type name, date, start–end, duration, avg HR, kcal,
+/// status (OPEN/CLOSED), and a source badge. Watch sessions are recognized
+/// by their stop-summary fields (written only by the watch's Stop marker);
+/// everything else reads "MANUAL" (detection-accepted and web-created rows
+/// are indistinguishable on the wire). Clicking the row opens the shared
+/// SessionDetails editor; DELETE stops propagation so it never selects.
+/// Fields are computed eagerly per For iteration; the sessions For
+/// re-subscribes to `types` so type CRUD refreshes the rows.
 #[component]
 fn SessionRow(
     session: AgogeSession,
     types: ReadSignal<Vec<AgogeType>>,
     on_delete: Callback<String>,
+    on_click: Callback<String>,
 ) -> impl IntoView {
     let id = session.id.clone();
+    let id_click = id.clone();
+    let id_delete = id.clone();
     let status = session.status.clone();
     // Name/color: resolved type when known; otherwise the raw type id (muted)
     // as a fallback, or "Undefined" for an untyped session.
@@ -3855,6 +4038,7 @@ fn SessionRow(
             true,
         ),
     };
+    let date = ms_from_iso(&session.start_time).map(date_str).unwrap_or_default();
     let time_text = {
         let start = ms_from_iso(&session.start_time)
             .map(fmt_time)
@@ -3867,18 +4051,42 @@ fn SessionRow(
             None => format!("{start} · {}m", elapsed_minutes_since(&session.start_time)),
         }
     };
+    let duration_text = match (session.duration_sec, &session.end_time) {
+        (Some(secs), _) => format!("{}m", secs / 60),
+        (None, Some(e)) => ms_from_iso(&session.start_time)
+            .and_then(|s| ms_from_iso(e).map(|en| (en - s) / 60_000.0))
+            .map(|mins| format!("{mins:.0}m"))
+            .unwrap_or_else(|| "—".to_string()),
+        (None, None) => format!("{}m", elapsed_minutes_since(&session.start_time)),
+    };
     let hr = session.avg_hr.map(|v| format!("{v} BPM"));
+    let kcal = session.workout_kcal.map(|v| format!("{v:.0} kcal"));
+    let is_watch = session.duration_sec.is_some()
+        || session.workout_kcal.is_some()
+        || session.avg_hr.is_some()
+        || session.movement_intensity.is_some()
+        || session.distance_m.is_some();
     view! {
-        <li class={if status == "active" { "row open" } else { "row" }}>
+        <li class={if status == "active" { "row open" } else { "row" }} on:click=move |_| on_click.call(id_click.clone())>
             <span class="dot" style=format!("background:{color}")></span>
             <span class="row-name" style={if undefined { "color:var(--muted)".to_string() } else { String::new() }}>
-                {format!("{} · {}", name, if status == "active" { "OPEN" } else { "CLOSED" })}
+                {name}
             </span>
+            <span class="row-date">{date}</span>
             <span class="row-time">{time_text}</span>
-            {hr.map(|h| view! { <span class="row-time">{h}</span> })}
-            <button class="btn small" on:click=move |_| on_delete.call(id.clone())>
-                "DELETE"
-            </button>
+            <span class="row-time">{duration_text}</span>
+            {hr.map(|h| view! { <span class="row-stat">{h}</span> })}
+            {kcal.map(|k| view! { <span class="row-stat">{k}</span> })}
+            <span class=format!("status-tag {}", if status == "active" { "open" } else { "closed" })>
+                {if status == "active" { "OPEN" } else { "CLOSED" }}
+            </span>
+            <span class=format!("src-badge {}", if is_watch { "watch" } else { "manual" })>
+                {if is_watch { "WATCH" } else { "MANUAL" }}
+            </span>
+            <button class="btn small" on:click=move |ev| {
+                ev.stop_propagation();
+                on_delete.call(id_delete.clone());
+            }>"DELETE"</button>
         </li>
     }
 }
@@ -4144,6 +4352,33 @@ fn hhmm_from_iso(s: &str) -> String {
         })
         .unwrap_or_default()
 }
+/// "YYYY-MM-DD" (UTC) from epoch ms — the ledger date filters.
+fn date_str(ms: f64) -> String {
+    let iso = iso_from_ms(ms);
+    iso.chars().take(10).collect()
+}
+
+/// Apply an "HH:MM" wall-clock time to the DATE of an existing ISO bound,
+/// keeping the original day (an open session's END borrows the start date).
+/// Returns the new ISO string, or None when either input is unusable.
+fn apply_hhmm_to_iso(base_iso: &str, hhmm: &str) -> Option<String> {
+    let (h, m) = hhmm.trim().split_once(':')?;
+    let h: i64 = h.trim().parse().ok()?;
+    let m: i64 = m.trim().parse().ok()?;
+    if !(0..24).contains(&h) || !(0..60).contains(&m) {
+        return None;
+    }
+    // Backend ISOs are UTC "YYYY-MM-DDTHH:MM:SS…Z": splice the time in at
+    // position 11, keeping the original date (and fractional seconds).
+    if base_iso.len() < 16 || base_iso.as_bytes().get(10) != Some(&b'T') {
+        return None;
+    }
+    let mut iso = String::with_capacity(base_iso.len());
+    iso.push_str(&base_iso[..11]);
+    iso.push_str(&format!("{h:02}:{m:02}"));
+    iso.push_str(&base_iso[16..]);
+    Some(iso)
+}
 
 /// Elapsed whole minutes between an ISO start time and now — the card
 /// "duration" for an open session (no end time yet).
@@ -4164,62 +4399,6 @@ fn parse_hhmm(s: &str) -> Option<i64> {
     Some(h * 3600 + m * 60)
 }
 
-/// One session strip chip: colored dot + type name + status (OPEN/CLOSED) +
-/// time range (or elapsed while open) + avg HR when the watch reported one.
-/// Clicking it opens the session's details panel. Unknown types fall back to
-/// the raw type id (muted) instead of "Undefined" alone.
-#[component]
-fn SessionChip(
-    session: AgogeSession,
-    types: ReadSignal<Vec<AgogeType>>,
-    on_open: Callback<AgogeSession>,
-) -> impl IntoView {
-    let sid = session.type_id.clone();
-    let name = {
-        let sid = sid.clone();
-        move || {
-            sid.as_ref()
-                .and_then(|tid| types.get().into_iter().find(|t| &t.id == tid))
-                .map(|t| t.name.clone())
-                .or_else(|| sid.clone())
-                .unwrap_or_else(|| "Undefined".to_string())
-        }
-    };
-    let undefined = {
-        let sid = sid.clone();
-        move || {
-            sid.as_ref()
-                .and_then(|tid| types.get().into_iter().find(|t| &t.id == tid))
-                .is_none()
-        }
-    };
-    let color = {
-        let sid = sid.clone();
-        move || {
-            sid.as_ref()
-                .and_then(|tid| types.get().into_iter().find(|t| &t.id == tid))
-                .map(|t| t.color_code.clone())
-                .unwrap_or_else(|| "#7B0000".to_string())
-        }
-    };
-    let status = if session.status == "active" { "OPEN" } else { "CLOSED" };
-    let time_text = match &session.end_time {
-        Some(e) => format!("{} → {}", hhmm_from_iso(&session.start_time), hhmm_from_iso(e)),
-        None => format!("{} · {}m", hhmm_from_iso(&session.start_time), elapsed_minutes_since(&session.start_time)),
-    };
-    let hr = session.avg_hr.map(|v| format!("{v} BPM"));
-    let s = session.clone();
-    view! {
-        <button class="session-chip" on:click=move |_| on_open.call(s.clone())>
-            <span class="dot" style=move || format!("background:{}", color())></span>
-            <span class="chip-name" style=move || if undefined() { "color:var(--muted)".to_string() } else { "".to_string() }>{move || name()}</span>
-            <span class="chip-time">{status}</span>
-            <span class="chip-time">{time_text}</span>
-            {hr.map(|h| view! { <span class="chip-time">{h}</span> })}
-        </button>
-    }
-}
-
 /// Details-first panel for a selected session: stats up front (loaded from
 /// the stats endpoint on open), then type, graphical start/end picking
 /// (click the chart), a duration override, and the destructive actions.
@@ -4233,6 +4412,7 @@ fn SessionDetails(
     on_type: Callback<(String, String)>,
     on_pick: Callback<PickField>,
     on_duration: Callback<(String, String)>,
+    on_time: Callback<(String, String, String)>,
     on_delete: Callback<String>,
     on_close: Callback<String>,
 ) -> impl IntoView {
@@ -4386,6 +4566,37 @@ fn SessionDetails(
 
     // DURATION override input ("HH:MM"); APPLY computes end = start + duration.
     let (duration, set_duration) = create_signal(String::new());
+    // Explicit START/END time inputs ("HH:MM"): pre-filled from the session
+    // bounds; APPLY keeps the bound's original DATE and replaces the time
+    // part (an open session's END borrows the start date). The PATCH runs in
+    // the parent via on_time, like the DURATION override.
+    let (start_input, set_start_input) = create_signal(hhmm_from_iso(&session.start_time));
+    let (end_input, set_end_input) = create_signal(session.end_time.as_deref().map(hhmm_from_iso).unwrap_or_default());
+    let (time_error, set_time_error) = create_signal(None::<String>);
+    let session_bounds = session.clone();
+    let id_time = id.clone();
+    let on_apply_time = Callback::new(move |field: String| {
+        let hhmm = if field == "start" {
+            start_input.get()
+        } else {
+            end_input.get()
+        };
+        let hhmm = hhmm.trim().to_string();
+        if hhmm.is_empty() {
+            return;
+        }
+        let base_iso = if field == "start" {
+            session_bounds.start_time.clone()
+        } else {
+            session_bounds.end_time.clone().unwrap_or_else(|| session_bounds.start_time.clone())
+        };
+        let Some(iso) = apply_hhmm_to_iso(&base_iso, &hhmm) else {
+            set_time_error.set(Some("BAD TIME — USE HH:MM".to_string()));
+            return;
+        };
+        set_time_error.set(None);
+        on_time.call((id_time.clone(), field, iso));
+    });
 
     let id_type = id.clone();
     let id_dur = id.clone();
@@ -4574,6 +4785,19 @@ fn SessionDetails(
                     on:click=move |_| on_pick.call(PickField::End)>
                 {move || if pick_field.get() == Some(PickField::End) { "PICKING END…" } else { "SET END" }}
             </button>
+            <div class="editor-time">
+                <label class="ctl">"START (HH:MM)"
+                    <input placeholder="HH:MM" prop:value=start_input on:input=move |ev| set_start_input.set(event_target_value(&ev)) />
+                </label>
+                <button class="btn" on:click=move |_| on_apply_time.call("start".to_string())>"APPLY"</button>
+                <label class="ctl">"END (HH:MM)"
+                    <input placeholder="HH:MM" prop:value=end_input on:input=move |ev| set_end_input.set(event_target_value(&ev)) />
+                </label>
+                <button class="btn" on:click=move |_| on_apply_time.call("end".to_string())>"APPLY"</button>
+                <Show when=move || time_error.get().is_some() fallback=|| ()>
+                    <span class="muted" style="color:var(--red-bright)">{move || time_error.get().unwrap_or_default()}</span>
+                </Show>
+            </div>
             <label class="ctl">"DURATION"
                 <input placeholder="HH:MM" prop:value=duration on:input=move |ev| set_duration.set(event_target_value(&ev)) />
             </label>

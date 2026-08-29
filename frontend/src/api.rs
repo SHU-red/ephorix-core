@@ -19,6 +19,9 @@ pub struct AgogeType {
     pub config: serde_json::Value,
     #[serde(default = "default_hr_interval")]
     pub hr_sampling_interval: i64,
+    /// Sidebar display order (0 = first); maintained by the reorder endpoint.
+    #[serde(default)]
+    pub sort_order: i64,
 }
 
 fn default_hr_interval() -> i64 {
@@ -279,6 +282,13 @@ pub async fn delete_json(base: &str, token: &str, path: &str) -> Result<Value, S
         .await
         .map_err(|e| format!("request failed: {e}"))?;
     check(resp).await
+}
+/// POST /api/v1/agoge-types/reorder — persists the sidebar drag order
+/// ({"order":[{"id":"<uuid>","sortOrder":n}]}); returns the updated type
+/// list in display order.
+pub async fn reorder_types(base: &str, token: &str, order: Vec<(String, i64)>) -> Result<Value, String> {
+    let body = json!({ "order": order.into_iter().map(|(id, so)| json!({ "id": id, "sortOrder": so })).collect::<Vec<_>>() });
+    post_json(base, token, "/api/v1/agoge-types/reorder", &body).await
 }
 
 pub async fn fetch_workouts(

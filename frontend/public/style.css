@@ -282,13 +282,24 @@ select { min-width: 120px; }
 .chart { width: 100%; }
 .session-overlay { position: absolute; z-index: 16; pointer-events: none; }
 
-/* ---------------- Session strip + inline editor (markers) ---------------- */
+/* ---------------- Syntaxis ledger (sessions review) ---------------- */
 
-.session-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
-.session-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font-size: 11px; letter-spacing: 0.06em; cursor: pointer; }
-.session-chip:hover { border-color: var(--red); color: var(--red); }
-.chip-name { font-weight: 600; letter-spacing: 0.06em; }
-.chip-time { color: var(--muted); font-size: 10px; font-family: "IBM Plex Mono", ui-monospace, monospace; }
+.ledger-filter { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 12px; }
+.ledger-filter .ledger-search { flex: 1 1 220px; min-width: 0; }
+.ledger-filter .ctl { flex: 1 1 130px; }
+.ledger-filter .ctl input[type="date"] { width: 100%; }
+.ledger { max-height: none; }
+.ledger .row { flex-wrap: wrap; row-gap: 6px; }
+.row-date { color: var(--muted); font-size: 11px; font-family: "IBM Plex Mono", ui-monospace, monospace; }
+.row-stat { color: var(--muted); font-size: 11px; font-family: "IBM Plex Mono", ui-monospace, monospace; white-space: nowrap; }
+.status-tag { font-size: 9px; letter-spacing: 0.14em; padding: 2px 6px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.status-tag.open { color: var(--red-bright); border-color: var(--red-bright); }
+.src-badge { font-size: 9px; letter-spacing: 0.12em; padding: 2px 6px; border: 1px solid var(--line); color: var(--dim); text-transform: uppercase; white-space: nowrap; }
+.src-badge.watch { color: var(--red); border-color: var(--red); }
+
+/* Session editor explicit HH:MM START/END inputs. */
+.editor-time { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.editor-time .ctl input { width: 88px; }
 
 .session-editor { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--line); }
 .chart-row { display: flex; align-items: stretch; gap: 12px; }
@@ -599,6 +610,14 @@ select { min-width: 120px; }
 .sidebar-item.on { background: var(--red-deep); box-shadow: inset 2px 0 0 var(--red); }
 .si-name { flex: 1; font-weight: 600; letter-spacing: 0.06em; }
 .si-cat { color: var(--dim); font-size: 10px; letter-spacing: 0.12em; }
+/* Agoges sidebar drag-to-reorder: ≡ handle, grab cursor, drop indicator. */
+.sidebar-hint { padding: 6px 14px; font-size: 9px; letter-spacing: 0.12em; color: var(--dim); border-bottom: 1px solid var(--line); }
+.drag-handle { cursor: grab; color: var(--dim); font-size: 14px; line-height: 1; user-select: none; }
+.drag-handle:active { cursor: grabbing; }
+.sidebar-item:hover .drag-handle { color: var(--red); }
+.sidebar-item[draggable="true"] { cursor: grab; }
+.sidebar-item[draggable="true"]:active { cursor: grabbing; }
+.sidebar-item.drag-over { background: #140a0a; outline: 1px solid var(--red); }
 
 .config-form { display: flex; flex-direction: column; gap: 16px; }
 .config-row { display: flex; gap: 20px; align-items: flex-end; flex-wrap: wrap; }
@@ -1412,4 +1431,52 @@ html, body { overflow-x: clip; }
 
 @media (prefers-reduced-motion: reduce) {
   .brand-lambda { animation: none; }
+}
+/* ---------------------------------------------------------------------------
+   Workout strip drag: edge-resize hit areas on each workout slot + the
+   one-line hint under the strip. The drag lifecycle lives in timeline.rs
+   (delegated pointer handlers on .workout-row); this file only styles the
+   handles. */
+/* The hint is a full-width flex item; wrapping drops it onto its own line
+   under the strip row (desktop row layout; mobile column layout stacks it
+   naturally as the last child). */
+.workout-row { flex-wrap: wrap; }
+.slot-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  cursor: ew-resize;
+  z-index: 2;
+  background: transparent;
+  user-select: none;
+  touch-action: none;
+}
+/* Subtle vertical bar revealed on hover so the hit area reads as draggable. */
+.slot-handle::after {
+  content: "";
+  position: absolute;
+  top: 12%;
+  bottom: 12%;
+  left: 50%;
+  width: 3px;
+  transform: translateX(-50%);
+  border-radius: 2px;
+  background: transparent;
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.5);
+  transition: background 0.12s ease;
+}
+.slot-handle:hover::after {
+  background: rgba(255, 255, 255, 0.85);
+}
+.slot-handle-left { left: 0; }
+.slot-handle-right { right: 0; }
+/* Muted one-line hint under the strip. */
+.workout-hint {
+  flex: 1 1 100%;
+  margin-top: 2px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
 }
