@@ -30,10 +30,14 @@ pub const MAX_BATCH_SAMPLES: usize = 1000;
 #[serde(rename_all = "camelCase")]
 pub struct HealthSample {
     pub timestamp: DateTime<Utc>,
+    // Wider than the DB columns on purpose: a garbage value from a sensor
+    // must never 422 the whole batch at deserialization (the watch JS then
+    // stalls the job and the data is lost). Values are clamped in the
+    // handler before binding (see sanitize_sample).
     #[serde(default)]
-    pub heart_rate: Option<i16>,
+    pub heart_rate: Option<i32>,
     #[serde(default)]
-    pub steps: Option<i32>,
+    pub steps: Option<i64>,
     #[serde(default)]
     pub active_calories: Option<f32>,
     // --- expanded signals (all optional) ---
@@ -65,6 +69,47 @@ pub struct HealthBatch {
     pub samples: Vec<HealthSample>,
 }
 
+/// Clamped, DB-ready values for one sample. A sensor glitch (garbage HR,
+/// huge steps, non-finite float) must never fail the whole batch — invalid
+/// signals are dropped per signal, the rest still lands.
+struct SanitizedSample {
+    timestamp: DateTime<Utc>,
+    heart_rate: Option<i16>,
+    steps: Option<i32>,
+    active_calories: Option<f32>,
+    sleep_seconds: Option<i32>,
+    restful_sleep_seconds: Option<i32>,
+    distance_m: Option<f32>,
+    active_seconds: Option<i32>,
+    resting_kcal: Option<f32>,
+    movement_intensity: Option<f32>,
+    reps: Option<i32>,
+}
+
+fn sanitize_sample(s: &HealthSample) -> SanitizedSample {
+    let fin = |v: f32| v.is_finite() && v >= 0.0 && v <= 1.0e6;
+    SanitizedSample {
+        timestamp: s.timestamp,
+        // Physically plausible bpm range; anything else is dropped.
+        heart_rate: s
+            .heart_rate
+            .filter(|v| (1..=255).contains(v))
+            .map(|v| v as i16),
+        steps: s
+            .steps
+            .filter(|v| *v >= 0)
+            .map(|v| v.min(i32::MAX as i64) as i32),
+        active_calories: s.active_calories.filter(|v| fin(*v) && *v > 0.0),
+        sleep_seconds: s.sleep_seconds.filter(|v| *v >= 0),
+        restful_sleep_seconds: s.restful_sleep_seconds.filter(|v| *v >= 0),
+        distance_m: s.distance_m.filter(|v| fin(*v) && *v > 0.0),
+        active_seconds: s.active_seconds.filter(|v| *v >= 0),
+        resting_kcal: s.resting_kcal.filter(|v| fin(*v)),
+        movement_intensity: s.movement_intensity.filter(|v| fin(*v) && *v > 0.0),
+        reps: s.reps.filter(|v| *v >= 0),
+    }
+}
+
 pub async fn ingest_batch(
     State(pool): State<PgPool>,
     Extension(user): Extension<AuthUser>,
@@ -86,9 +131,14 @@ pub async fn ingest_batch(
         batch.batched_at
     );
 
+    // Sanitize once so the DB binds and the normalizer only ever see
+    // plausible values (a glitchy sample degrades to fewer signals, never
+    // to a failed batch).
+    let clean: Vec<SanitizedSample> = batch.samples.iter().map(sanitize_sample).collect();
+
     let mut tx = pool.begin().await?;
     let mut raw_inserted = 0usize;
-    for s in &batch.samples {
+    for s in &clean {
         let res = sqlx::query(
             "INSERT INTO raw_health_data (timestamp, user_id, heart_rate, steps, active_calories)
              VALUES ($1, $2, $3, $4, $5)
@@ -106,8 +156,7 @@ pub async fn ingest_batch(
     tx.commit().await?;
 
     // Normalized mirror for every reported signal.
-    let normalized: Vec<_> = batch
-        .samples
+    let normalized: Vec<_> = clean
         .iter()
         .flat_map(|s| {
             normalize_pebble(

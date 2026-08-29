@@ -37,6 +37,11 @@ const DRAIN_PER_MOVE: f64 = 0.005; // movement intensity (au) → battery points
 const STRESS_RESTING_HR: f64 = 55.0; // bpm below which stress is 0
 const STRESS_FULL_HR: f64 = 120.0;   // bpm at which the daily 0..100 stress saturates
 const STRESS_SERIES_FULL_HR: f64 = 175.0; // bpm at which series stress is 300 (0..300 scale)
+// Circadian HR baseline for gap-filling: the user's own mean HR per UTC hour
+// over the trailing window; hours with fewer than this many samples are not
+// baseline-backed (buckets then keep the old forward-fill).
+const CIRCADIAN_WINDOW_DAYS: i64 = 30;
+const CIRCADIAN_MIN_SAMPLES: i64 = 3;
 /// Stateless daily battery: full tank (300) + the night's recharge − the
 /// day's activity drain and HR-strain drain, clamped to 0..300. Kept pure
 /// so the calibration can be unit-tested.
@@ -165,6 +170,12 @@ struct BatterySeriesPoint {
     ts: f64,      // epoch ms
     stress: f64,  // 0..300
     battery: f64, // 0..300
+    /// True when the bucket's heart rate was not actually sampled and the
+    /// stress value comes from the user's own circadian HR baseline (their
+    /// mean HR for that UTC hour over the trailing window). The frontend
+    /// renders these segments dashed; they never touch raw storage.
+    #[serde(default)]
+    estimated: bool,
 }
 
 /// A continuous ("always live") body battery: a running integral over
@@ -240,6 +251,30 @@ async fn battery_series_inner(
     .fetch_all(pool)
     .await?;
 
+    // Per-user circadian HR baseline: the user's OWN mean heart rate for
+    // each UTC hour of the day over the trailing window. Hours with too few
+    // samples get no baseline (the bucket falls back to forward-fill).
+    let baseline: Vec<Option<f64>> = {
+        let rows: Vec<(i32, f64, i64)> = sqlx::query_as(
+            "SELECT EXTRACT(HOUR FROM ts)::int AS h, AVG(value)::float8 AS avg_hr, COUNT(*)::int8 AS n
+             FROM measurements
+             WHERE user_id = $1 AND metric = 'heart_rate'
+               AND ts >= now() - $2::interval
+             GROUP BY EXTRACT(HOUR FROM ts)",
+        )
+        .bind(user_id)
+        .bind(format!("{CIRCADIAN_WINDOW_DAYS} days"))
+        .fetch_all(pool)
+        .await?;
+        let mut prof: [Option<f64>; 24] = [None; 24];
+        for (h, avg, n) in rows {
+            if (0..24).contains(&h) && n >= CIRCADIAN_MIN_SAMPLES && avg.is_finite() {
+                prof[h as usize] = Some(avg);
+            }
+        }
+        prof.to_vec()
+    };
+
     let mut battery = 300.0;
     let mut last_stress = 0.0;
     let mut points = Vec::with_capacity(rows.len());
@@ -249,16 +284,41 @@ async fn battery_series_inner(
             && r.kcal == 0.0
             && r.steps == 0.0
             && r.movement == 0.0;
-        let stress = match r.avg_hr {
-            // Linear HR-elevation strain: 55 bpm → 0, 175 bpm → 300.
-            Some(hr) if hr > STRESS_RESTING_HR =>
+        // Real HR bucket → real stress. Missing HR → the user's own
+        // circadian mean for that hour (estimated, flagged, rendered dashed
+        // by the frontend); no baseline yet → hold the last stress as today.
+        let (hr, estimated) = match r.avg_hr {
+            Some(hr) => (hr, false),
+            None => {
+                let hour = ((r.ts / 3_600_000.0) as i64).rem_euclid(24) as usize;
+                match baseline.get(hour).copied().flatten() {
+                    Some(b) => (b, true),
+                    None => (0.0, false), // forward-fill path below
+                }
+            }
+        };
+        let stress = if estimated {
+            // Baseline HR is itself a "typical" resting-ish value; apply the
+            // same elevation strain so it is comparable with real buckets.
+            if hr > STRESS_RESTING_HR {
                 ((hr - STRESS_RESTING_HR) / (STRESS_SERIES_FULL_HR - STRESS_RESTING_HR) * 300.0)
-                    .clamp(0.0, 300.0),
-            Some(_) => 0.0,
-            None => last_stress, // no HR sample: hold the last stress, never null
+                    .clamp(0.0, 300.0)
+            } else {
+                0.0
+            }
+        } else {
+            match r.avg_hr {
+                Some(hr) if hr > STRESS_RESTING_HR =>
+                    ((hr - STRESS_RESTING_HR) / (STRESS_SERIES_FULL_HR - STRESS_RESTING_HR) * 300.0)
+                        .clamp(0.0, 300.0),
+                Some(_) => 0.0,
+                None => last_stress, // no HR sample and no baseline
+            }
         };
         // Empty buckets carry the battery forward unchanged (no drain, no
-        // recharge); their stress was already forward-filled above.
+        // recharge) — an estimated HR alone is not evidence of activity, so
+        // it never depletes the battery by itself; buckets with real
+        // activity signals apply the (possibly estimated) stress.
         if !empty {
             let recharge = r.sleep_s / 3600.0 * RECHARGE_PER_HOUR;
             let drain = r.kcal * DRAIN_PER_KCAL
@@ -267,7 +327,7 @@ async fn battery_series_inner(
             battery = (battery + recharge - drain - stress * DRAIN_PER_STRESS).clamp(0.0, 300.0);
         }
         last_stress = stress;
-        points.push(BatterySeriesPoint { ts: r.ts, stress, battery });
+        points.push(BatterySeriesPoint { ts: r.ts, stress, battery, estimated });
     }
     Ok(points)
 }

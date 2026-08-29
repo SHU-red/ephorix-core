@@ -497,6 +497,10 @@ pub struct BatterySeriesPoint {
     pub ts: f64,
     pub stress: f64,
     pub battery: f64,
+    /// True when the stress comes from the user's circadian HR baseline
+    /// (no real HR sample in the bucket); the chart renders it dashed.
+    #[serde(default)]
+    pub estimated: bool,
 }
 
 pub async fn fetch_body_battery_series(

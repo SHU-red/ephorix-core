@@ -905,6 +905,8 @@ fn build_battery_opts(width: i32) -> serde_json::Value {
             { "label": "PONOS", "stroke": "#90a4ae", "width": 1.5,
               "fill": "rgba(144, 164, 174, 0.14)", "spanGaps": false,
               "points": { "show": false } },
+            { "label": "EST", "stroke": "#90a4ae", "width": 1, "dash": [4, 3],
+              "spanGaps": false, "points": { "show": false } },
             { "label": "DYNAMIS", "stroke": "#e53935", "width": 2.5, "scale": "y2",
               "fill": "rgba(229, 57, 53, 0.15)", "spanGaps": false,
               "points": { "show": false } }
@@ -912,12 +914,21 @@ fn build_battery_opts(width: i32) -> serde_json::Value {
     })
 }
 
-/// uPlot data rows: [x epoch-ms, stress, battery].
+/// Battery chart rows: [x, real stress, ESTIMATED stress (dashed), battery].
+/// Real and estimated stress are split so uPlot can draw the estimated
+/// segments dashed (a single series cannot switch line styles mid-line).
 fn build_battery_data(points: Vec<BatterySeriesPoint>) -> serde_json::Value {
     let xs: Vec<f64> = points.iter().map(|p| p.ts).collect();
-    let stress: Vec<Option<f64>> = points.iter().map(|p| Some(p.stress)).collect();
+    let stress_real: Vec<Option<f64>> = points
+        .iter()
+        .map(|p| if p.estimated { None } else { Some(p.stress) })
+        .collect();
+    let stress_est: Vec<Option<f64>> = points
+        .iter()
+        .map(|p| if p.estimated { Some(p.stress) } else { None })
+        .collect();
     let battery: Vec<Option<f64>> = points.iter().map(|p| Some(p.battery)).collect();
-    json!([xs, stress, battery])
+    json!([xs, stress_real, stress_est, battery])
 }
 
 fn render_overlay(
