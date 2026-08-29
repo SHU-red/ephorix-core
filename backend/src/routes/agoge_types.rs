@@ -38,10 +38,12 @@ pub struct UpsertType {
     pub hr_sampling_interval: Option<i32>,
 }
 
-/// Allowed HR sampling intervals (seconds) — the same choices as the watch's
-/// Auto Push menu. 15/30/60 min are accepted for forward compatibility but
-/// the OS clamps any request above 600 s.
-const HR_INTERVALS: [i32; 7] = [0, 60, 300, 600, 900, 1800, 3600];
+/// Allowed HR sampling intervals (seconds) — the same set as the watch's
+/// per-Agoge setting. Sub-minute values (10/30 s) are legal foreground
+/// requests (SDK range 1..600 s) and apply only while the app is open with
+/// the workout active; 15/30/60 min are accepted but the OS clamps any
+/// request above 600 s.
+const HR_INTERVALS: [i32; 9] = [0, 10, 30, 60, 300, 600, 900, 1800, 3600];
 
 fn normalize_hr_interval(v: Option<i32>) -> Option<i32> {
     v.filter(|x| HR_INTERVALS.contains(x))
@@ -137,5 +139,22 @@ pub async fn delete(
         return Err(ApiError::NotFound(format!("agoge type {id} not found")));
     }
     Ok(Json(json!({ "deleted": id })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_hr_interval_accepts_exact_whitelist() {
+        // Every legal value — including the sub-minute per-workout choices —
+        // passes through unchanged; anything else is rejected.
+        for v in [0, 10, 30, 60, 300, 600, 900, 1800, 3600] {
+            assert_eq!(normalize_hr_interval(Some(v)), Some(v), "value {v}");
+        }
+        assert_eq!(normalize_hr_interval(Some(15)), None);
+        assert_eq!(normalize_hr_interval(Some(45)), None);
+        assert_eq!(normalize_hr_interval(None), None);
+    }
 }
 
