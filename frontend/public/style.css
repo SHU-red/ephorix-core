@@ -1545,3 +1545,44 @@ html, body { overflow-x: clip; }
   width: 100%;
   height: 100%;
 }
+/* Nomoi: API endpoint reference (rendered from API_GROUPS in app.rs). */
+.api-group-name {
+  color: var(--red);
+  font-family: "Anton", "Arial Narrow", sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  margin: 12px 0 6px;
+}
+.api-table { max-height: 420px; }
+.api-row {
+  display: grid;
+  grid-template-columns: 60px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: baseline;
+}
+.api-method {
+  flex: 0 0 auto;
+  min-width: 48px;
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-align: center;
+}
+.api-method--get { color: #66bb6a; }
+.api-method--post { color: #ffca28; }
+.api-method--put { color: #42a5f5; }
+.api-method--patch { color: #ab47bc; }
+.api-method--delete { color: #ef5350; }
+.api-path {
+  font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.api-desc { color: var(--muted); font-size: 11px; text-align: right; }
+@media (max-width: 720px) {
+  .api-row { grid-template-columns: 54px minmax(0, 1fr); }
+  .api-desc { grid-column: 2; text-align: left; }
+}

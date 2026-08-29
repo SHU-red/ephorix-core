@@ -111,6 +111,102 @@ const LOG_KINDS: [&str; 10] = [
     "nutrition", "measurement", "import", "action",
 ];
 
+/// One API endpoint as documented in the Nomoi reference.
+struct ApiEndpoint {
+    method: &'static str,
+    path: &'static str,
+    desc: &'static str,
+}
+
+/// A collapsible group of the API reference (Nomoi -> API ENDPOINTS).
+struct ApiGroup {
+    name: &'static str,
+    endpoints: &'static [ApiEndpoint],
+}
+
+/// Every route the frontend, watch, and Pythia speak. Keep in sync with
+/// backend/src/routes/mod.rs. `/api/v1/*` requires the bearer token; the
+/// brand + healthz routes are public.
+static API_GROUPS: &[ApiGroup] = &[
+    ApiGroup {
+        name: "SYSTEM & BRAND — PUBLIC",
+        endpoints: &[
+            ApiEndpoint { method: "GET", path: "/healthz", desc: "liveness probe for orchestration" },
+            ApiEndpoint { method: "GET", path: "/api/brand/icon.svg", desc: "app icon (SVG, hotlinkable, no auth)" },
+        ],
+    },
+    ApiGroup {
+        name: "HEALTH & EVENTS — INGEST",
+        endpoints: &[
+            ApiEndpoint { method: "POST", path: "/api/v1/health/batch", desc: "bulk HR/steps/kcal sample batch (watch sync)" },
+            ApiEndpoint { method: "POST", path: "/api/v1/health/days", desc: "per-day health snapshot" },
+            ApiEndpoint { method: "POST", path: "/api/v1/events/marker", desc: "ingest one marker at a timestamp" },
+            ApiEndpoint { method: "GET", path: "/api/v1/events/markers", desc: "list markers" },
+            ApiEndpoint { method: "POST", path: "/api/v1/ingest", desc: "generic sample ingest" },
+            ApiEndpoint { method: "GET", path: "/api/v1/measurements", desc: "list raw measurements" },
+            ApiEndpoint { method: "POST", path: "/api/v1/measurements", desc: "add a measurement (metric + value)" },
+            ApiEndpoint { method: "POST", path: "/api/v1/import", desc: "bulk import (CSV / JSON / GPX / Health Connect)" },
+        ],
+    },
+    ApiGroup {
+        name: "AGOGE — TYPES & SESSIONS",
+        endpoints: &[
+            ApiEndpoint { method: "GET", path: "/api/v1/agoge-types", desc: "list training types" },
+            ApiEndpoint { method: "POST", path: "/api/v1/agoge-types", desc: "create a type" },
+            ApiEndpoint { method: "POST", path: "/api/v1/agoge-types/reorder", desc: "persist the drag order" },
+            ApiEndpoint { method: "PUT", path: "/api/v1/agoge-types/{id}", desc: "update a type" },
+            ApiEndpoint { method: "DELETE", path: "/api/v1/agoge-types/{id}", desc: "delete a type" },
+            ApiEndpoint { method: "GET", path: "/api/v1/agoge-sessions", desc: "list workout sessions" },
+            ApiEndpoint { method: "POST", path: "/api/v1/agoge-sessions", desc: "create a session" },
+            ApiEndpoint { method: "PATCH", path: "/api/v1/agoge-sessions/{id}", desc: "update start/end/type…" },
+            ApiEndpoint { method: "DELETE", path: "/api/v1/agoge-sessions/{id}", desc: "delete a session" },
+            ApiEndpoint { method: "GET", path: "/api/v1/agoge-sessions/{id}/stats", desc: "per-session stats" },
+            ApiEndpoint { method: "GET", path: "/api/v1/agoge-sessions/{id}/exercises", desc: "list exercises" },
+            ApiEndpoint { method: "POST", path: "/api/v1/agoge-sessions/{id}/exercises", desc: "add an exercise" },
+            ApiEndpoint { method: "PATCH", path: "/api/v1/agoge-sessions/{id}/exercises/{eid}", desc: "update an exercise" },
+            ApiEndpoint { method: "DELETE", path: "/api/v1/agoge-sessions/{id}/exercises/{eid}", desc: "delete an exercise" },
+        ],
+    },
+    ApiGroup {
+        name: "METRICS",
+        endpoints: &[
+            ApiEndpoint { method: "GET", path: "/api/v1/timeline", desc: "chart series for the current range" },
+            ApiEndpoint { method: "GET", path: "/api/v1/metrics/body-battery", desc: "current body battery" },
+            ApiEndpoint { method: "GET", path: "/api/v1/metrics/body-battery-series", desc: "body battery series (EST-filled gaps)" },
+            ApiEndpoint { method: "GET", path: "/api/v1/metrics/baselines", desc: "per-user baselines" },
+            ApiEndpoint { method: "GET", path: "/api/v1/metrics/readiness", desc: "readiness score" },
+            ApiEndpoint { method: "GET", path: "/api/v1/metrics/workouts", desc: "detected workouts" },
+            ApiEndpoint { method: "POST", path: "/api/v1/metrics/workouts/{id}/accept", desc: "accept a workout detection" },
+            ApiEndpoint { method: "POST", path: "/api/v1/metrics/workouts/{id}/reject", desc: "reject a workout detection" },
+        ],
+    },
+    ApiGroup {
+        name: "NUTRITION",
+        endpoints: &[
+            ApiEndpoint { method: "GET", path: "/api/v1/nutrition", desc: "list nutrition entries" },
+            ApiEndpoint { method: "POST", path: "/api/v1/nutrition", desc: "add a nutrition entry" },
+            ApiEndpoint { method: "GET", path: "/api/v1/nutrition/daily", desc: "per-day nutrition summary" },
+        ],
+    },
+    ApiGroup {
+        name: "SETTINGS & ACTIONS",
+        endpoints: &[
+            ApiEndpoint { method: "GET", path: "/api/v1/settings", desc: "read settings" },
+            ApiEndpoint { method: "PUT", path: "/api/v1/settings", desc: "write settings" },
+            ApiEndpoint { method: "GET", path: "/api/v1/actions", desc: "action log (audited mutations)" },
+            ApiEndpoint { method: "POST", path: "/api/v1/actions/{id}/revert", desc: "revert an audited action" },
+        ],
+    },
+    ApiGroup {
+        name: "PYTHIA — AI",
+        endpoints: &[
+            ApiEndpoint { method: "POST", path: "/api/v1/ai/parse", desc: "extract {kind, amount} from text (nutrition)" },
+            ApiEndpoint { method: "POST", path: "/api/v1/ai/chat", desc: "oracle chat round-trip" },
+            ApiEndpoint { method: "POST", path: "/api/v1/ai/test", desc: "provider connectivity test" },
+        ],
+    },
+];
+
 /// Merges the in-memory event feed and the persisted server action log into a
 /// single newest-first list of unified log rows.
 fn unified_log_rows(events: Vec<LogEntry>, actions: Vec<ActionLogEntry>) -> Vec<UnifiedLogRow> {
@@ -3474,6 +3570,33 @@ pub fn App() -> impl IntoView {
                                     }).collect_view()}
                                 }.into_view()
                             }}
+                        </section>
+                        <section class="panel">
+                            <div class="panel-head">
+                                <h2>"API REFERENCE"</h2>
+                                <span class="muted">"every route the watch, web, and Pythia speak"</span>
+                            </div>
+                            <details class="advanced">
+                                <summary>"ALL ENDPOINTS"</summary>
+                                <p class="muted" style="margin:0 0 4px">"`/api/v1/*` requires the bearer token from the API section; `/healthz` + `/api/brand/icon.svg` are public."</p>
+                                {API_GROUPS.iter().map(|g| {
+                                    view! {
+                                        <h3 class="api-group-name">{g.name}</h3>
+                                        <ul class="list api-table">
+                                            {g.endpoints.iter().map(|e| {
+                                                let method = e.method.to_lowercase();
+                                                view! {
+                                                    <li class="row api-row">
+                                                        <span class={format!("api-method api-method--{}", method)}>{e.method}</span>
+                                                        <code class="api-path">{e.path}</code>
+                                                        <span class="api-desc">{e.desc}</span>
+                                                    </li>
+                                                }
+                                            }).collect_view()}
+                                        </ul>
+                                    }
+                                }).collect_view()}
+                            </details>
                         </section>
                     }.into_view(),
                     Tab::Skopos => view! {
