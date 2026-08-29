@@ -715,6 +715,46 @@
       if (state.overlay) state.overlay.style.display = "none";
     });
 
+    // Wheel / trackpad scroll pans the x-axis in time direction while the
+    // pointer is over the chart: deltaX pans directly (horizontal trackpad),
+    // deltaY pans time too so a plain mouse wheel works. Both linked charts
+    // move together via the group; the view is clamped to the loaded data
+    // extent. passive:false lets preventDefault stop the page from scrolling.
+    root.addEventListener("wheel", function (e) {
+      if (state.panning || state.dragging) return; // never pan mid-drag
+      var xs = c.scales.x;
+      if (xs.min == null || xs.max == null) return;
+      var span = xs.max - xs.min;
+      if (span <= 0 || !c.bbox || c.bbox.width <= 0) return;
+      var delta = (Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY) || 0;
+      if (delta === 0) return;
+      var px = delta;
+      if (e.deltaMode === 1) px *= 16; // lines (Firefox)
+      else if (e.deltaMode === 2) px *= 120; // pages
+      var msPerPx = span / c.bbox.width;
+      var shift = px * msPerPx;
+      var lo = xs.min + shift;
+      var hi = xs.max + shift;
+      var g = groupOf(id);
+      var full = g && g.full ? g.full : null;
+      if (!full) {
+        var x0 = c.data && c.data[0];
+        if (x0 && x0.length) full = [x0[0], x0[x0.length - 1]];
+      }
+      if (full) {
+        if (lo < full[0]) { hi -= lo - full[0]; lo = full[0]; }
+        if (hi > full[1]) { lo -= hi - full[1]; hi = full[1]; }
+      }
+      if (lo === xs.min && hi === xs.max) return; // already at an edge
+      if (g) {
+        setGroupX(g, lo, hi);
+      } else {
+        c.setScale("x", { min: lo, max: hi });
+        fireScaleChange(id);
+      }
+      e.preventDefault();
+    }, { passive: false });
+
     return state;
   }
 

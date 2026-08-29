@@ -797,7 +797,7 @@ pub fn TimelineChart(
                     <span class="legend-name">"WORKOUTS"</span>
                 </div>
             </aside>
-            <div class="workout-hint">"DRAG BLOCK EDGES TO MOVE START/END · CLICK FOR DETAILS"</div>
+            <div class="workout-hint">"DRAG BLOCK EDGES TO MOVE START/END · CLICK FOR DETAILS · SCROLL CHARTS TO PAN TIME"</div>
         </div>
         <div class="chart-row">
             <div class="battery-wrap">
