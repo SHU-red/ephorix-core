@@ -13,7 +13,16 @@ COPY index.html ./
 COPY public ./public
 COPY src ./src
 
-RUN trunk build --release
+# Cache-bust stable public/ assets: give style.css and uplot-bridge.js a
+# per-build content hash in the URL and rewrite index.html to match. A stale
+# cached stylesheet/bridge can then NEVER be served after a redeploy — the
+# no-cache index.html always points at the fresh hashed file.
+RUN css=$(sha256sum dist/style.css | cut -c1-16) \
+ && mv dist/style.css "dist/style.$css.css" \
+ && sed -i "s|/style.css|/style.$css.css|" dist/index.html \
+ && js=$(sha256sum dist/uplot-bridge.js | cut -c1-16) \
+ && mv dist/uplot-bridge.js "dist/uplot-bridge.$js.js" \
+ && sed -i "s|/uplot-bridge.js|/uplot-bridge.$js.js|" dist/index.html
 
 # Stage 2: nginx serves the bundle and proxies /api to the API service
 # (same-origin, so the browser never needs CORS).
