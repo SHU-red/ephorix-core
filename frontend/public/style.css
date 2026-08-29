@@ -1480,3 +1480,57 @@ html, body { overflow-x: clip; }
   letter-spacing: 0.08em;
   color: var(--muted);
 }
+
+/* ---------------------------------------------------------------------------
+   Toasts — transient acknowledgements for user interventions (types saved,
+   session times edited, reorder applied, detections triaged, ...). Fixed
+   bottom-center stack; auto-expire via the app's toast queue. */
+.toast-container {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  z-index: 2000;
+  pointer-events: none;
+}
+.toast {
+  background: #101010;
+  border: 1px solid var(--red);
+  color: #f5f5f5;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 7px 14px;
+  border-radius: 4px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.6);
+  animation: toast-in 0.18s ease-out;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Save button success state (config form stays open). */
+.btn.saved {
+  border-color: #4caf50;
+  color: #4caf50;
+}
+
+/* Sidebar type icon (Agoges tab): the type's glyph tinted in its color. */
+.si-icon {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 18px;
+}
+.si-icon svg {
+  width: 100%;
+  height: 100%;
+}

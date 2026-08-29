@@ -162,15 +162,15 @@ pub fn TimelineChart(
     clear_trigger: RwSignal<u32>,
     reset_zoom: RwSignal<u32>,
     on_click_at: Callback<f64>,
-    /// Fired after a manual drag-zoom: `Some((from, to))` with the new
-    /// x-domain when the drag changed x (so the parent can refetch data
-    /// bucketed to that zoom), `None` for a y-only zoom.
     on_zoom: Callback<Option<(f64, f64)>>,
     on_ready: Callback<u32>,
     on_session_click: Callback<String>,
     /// Fired when the user finishes dragging a workout slot edge:
     /// `(session_id, "start" | "end", unix_ms)` with the new edge time.
     on_session_edit: Callback<(String, String, f64)>,
+    /// The currently selected session — its block shows the corner drag
+    /// knobs (click = select, then explicitly drag a knob).
+    selected_session: ReadSignal<Option<AgogeSession>>,
 ) -> impl IntoView {
     let chart_ref: NodeRef<leptos::html::Div> = create_node_ref();
     let overlay_ref: NodeRef<leptos::html::Div> = create_node_ref();
@@ -365,8 +365,8 @@ pub fn TimelineChart(
             render_overlay(&overlay, id, &nut, &slp);
         }
     });
-
-    // Re-render the workout strip when sessions or types change, or the
+    // Re-render the workout strip when sessions or types change, the
+    // selection changes (corner knobs appear on the selected block), or the
     // x-scale moves (zoom_version), so the slots track the current domain.
     create_effect(move |_| {
         let id = chart_id.get();
@@ -375,12 +375,12 @@ pub fn TimelineChart(
         }
         let sess = sessions.get();
         let ty = types.get();
+        let sel_id = selected_session.get().map(|s| s.id);
         let _ = zoom_version.get();
         if let Some(strip) = workout_ref.get() {
-            render_workout_strip(&strip, id, &sess, &ty, on_session_edit);
+            render_workout_strip(&strip, id, &sess, &ty, sel_id.as_deref(), on_session_edit);
         }
     });
-
     // Persistent selection band: a translucent red band across the main chart,
     // the workout strip, and the body-battery chart. Repositioned whenever the
     // selection or the x-scale changes (zoom/reset/data resync); hidden when
@@ -743,7 +743,8 @@ pub fn TimelineChart(
             let id = chart_id.get();
             if id != 0 {
                 if let Some(strip) = workout_ref.get() {
-                    render_workout_strip(&strip, id, &sessions.get(), &types.get(), on_session_edit);
+                    let sel_id = selected_session.get().map(|s| s.id);
+                    render_workout_strip(&strip, id, &sessions.get(), &types.get(), sel_id.as_deref(), on_session_edit);
                 }
             }
         }
@@ -797,7 +798,7 @@ pub fn TimelineChart(
                     <span class="legend-name">"WORKOUTS"</span>
                 </div>
             </aside>
-            <div class="workout-hint">"DRAG BLOCK EDGES TO MOVE START/END · CLICK FOR DETAILS · SCROLL CHARTS TO PAN TIME"</div>
+            <div class="workout-hint">"CLICK A BLOCK TO SELECT · DRAG ITS CORNER KNOBS TO MOVE START/END · SCROLL CHARTS TO PAN TIME"</div>
         </div>
         <div class="chart-row">
             <div class="battery-wrap">
@@ -1131,16 +1132,15 @@ fn render_workout_popup(popup: &web_sys::HtmlDivElement, payload: &str) {
 /// in plot-relative px (like `render_overlay`) so the slots track the
 /// current x-domain as the user zooms. Each slot always carries the type
 /// glyph (`.workout-slot-icon`); narrow slots (<44px) hide the label and
-/// center the glyph. Rich hover details travel as JSON in `data-popup`
-/// (replaces the native title) and are rendered by the delegated pointer
-/// handlers in `TimelineChart`. Each slot also carries two edge-resize
-/// handles (`.slot-handle`) that the same delegated handlers drive; the
-/// dragged edge is committed through the component's `on_session_edit`.
+/// handlers in `TimelineChart`. The SELECTED slot additionally carries two
+/// corner drag knobs (`.slot-handle`) — click selects, dragging a knob
+/// moves the edge; the committed edge goes through `on_session_edit`.
 fn render_workout_strip(
     container: &leptos::html::HtmlElement<leptos::html::Div>,
     chart_id: u32,
     sessions: &[AgogeSession],
     types: &[AgogeType],
+    selected_id: Option<&str>,
     _on_session_edit: Callback<(String, String, f64)>,
 ) {
     let doc = web_sys::window().unwrap().document().unwrap();
@@ -1234,14 +1234,18 @@ fn render_workout_strip(
         let _ = label.set_attribute("style", &format!("color:{lcolor};text-shadow:{lshadow};"));
         label.set_text_content(Some(&format!("{name}  {}–{}", hhmm(from), hhmm(to))));
         let _ = el.append_child(&label);
-        // Edge-resize handles: 10px hit areas pinned to the slot's left/right
-        // edges. The delegated pointer handlers in `TimelineChart` drive the
-        // drag; `data-side` tells them which edge is being moved.
-        for (cls, side) in [("slot-handle-left", "start"), ("slot-handle-right", "end")] {
-            let handle = doc.create_element("div").unwrap();
-            let _ = handle.set_class_name(&format!("slot-handle {cls}"));
-            let _ = handle.set_attribute("data-side", side);
-            let _ = el.append_child(&handle);
+        // Two-step edge editing: the SELECTED block shows two corner drag
+        // knobs (top-left = start, top-right = end), deliberately small and
+        // poking outside the block, so a plain click can never start a drag.
+        // The delegated pointer handlers drive the drag; `data-side` tells
+        // them which edge is being moved.
+        if selected_id == Some(s.id.as_str()) {
+            for (cls, side) in [("slot-handle-corner-left", "start"), ("slot-handle-corner-right", "end")] {
+                let handle = doc.create_element("div").unwrap();
+                let _ = handle.set_class_name(&format!("slot-handle slot-handle-corner {cls}"));
+                let _ = handle.set_attribute("data-side", side);
+                let _ = el.append_child(&handle);
+            }
         }
         let _ = container.append_child(&el);
     }

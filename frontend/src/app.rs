@@ -10,7 +10,7 @@ use wasm_bindgen::JsCast;
 use gloo_net::http::Request;
 
 use crate::api::*;
-use crate::icons::{glyph_svg, GLYPH_KEYS, LAMBDA};
+use crate::icons::{glyph_svg, glyph_svg_tinted, GLYPH_KEYS, LAMBDA};
 use crate::timeline::{SeriesConfig, TimelineChart};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -696,6 +696,24 @@ pub fn App() -> impl IntoView {
     let (settings_loaded, set_settings_loaded) = create_signal(false);
     let clear_sel = create_rw_signal(0u32);
     let reset_zoom = create_rw_signal(0u32);
+    // Toast acknowledgements: transient confirmations for user interventions.
+    let toasts: RwSignal<Vec<(String, String)>> = create_rw_signal(Vec::new());
+    let toast_seq = create_rw_signal(0u32);
+    // Bumped by the parent when a type save lands; the config form shows a
+    // transient "SAVED" on its button and stays open.
+    let type_saved: RwSignal<u32> = create_rw_signal(0);
+
+    // Push a transient toast; auto-expires after ~2.6s.
+    let toast = move |msg: &str| {
+        let id = format!("toast{}", toast_seq.get());
+        toast_seq.update(|n| *n += 1);
+        toasts.update(|ts| ts.push((id.clone(), msg.to_string())));
+        spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(2600).await;
+            toasts.update(|ts| ts.retain(|(i, _)| *i != id));
+        });
+    };
+
     // Highlighted range chip (None = nothing highlighted: a manual zoom
     // desyncs the chips from the actual x-domain until a preset is re-picked).
     let active_range = create_rw_signal(None::<i64>);
@@ -1285,7 +1303,10 @@ pub fn App() -> impl IntoView {
         let token = token.get();
         spawn_local(async move {
             match delete_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}")).await {
-                Ok(_) => refresh(),
+                Ok(_) => {
+                    toast("Session deleted");
+                    refresh();
+                }
                 Err(e) => {
                     refresh();
                     set_error.set(Some(e));
@@ -1460,9 +1481,48 @@ pub fn App() -> impl IntoView {
             match patch_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}"), &body).await {
                 Ok(_) => {
                     selected_session.set(None);
+                    toast("Session time updated");
                     refresh();
                 }
                 Err(e) => set_error.set(Some(e)),
+            }
+        });
+    });
+
+    // Strip corner-knob drags (two-step editing): PATCH the moved edge and
+    // KEEP the selection open — the editor stays live while the user
+    // fine-tunes both ends. The selected session object is updated
+    // optimistically so the panel reflects the new time immediately;
+    // refresh() resyncs the strip from the server.
+    let drag_session_time = Callback::new(move |(id, field, iso): (String, String, String)| {
+        selected_session.update(|opt| {
+            if let Some(s) = opt {
+                if s.id == id {
+                    if field == "start" {
+                        s.start_time = iso.clone();
+                    } else {
+                        s.end_time = Some(iso.clone());
+                    }
+                }
+            }
+        });
+        let base = base.get();
+        let token = token.get();
+        let body = if field == "start" {
+            json!({ "startTime": iso.clone() })
+        } else {
+            json!({ "endTime": iso.clone() })
+        };
+        spawn_local(async move {
+            match patch_json(&base, &token, &format!("/api/v1/agoge-sessions/{id}"), &body).await {
+                Ok(_) => {
+                    toast("Session time updated");
+                    refresh();
+                }
+                Err(e) => {
+                    set_error.set(Some(e));
+                    refresh();
+                }
             }
         });
     });
@@ -1494,7 +1554,10 @@ pub fn App() -> impl IntoView {
         let token = token.get();
         spawn_local(async move {
             match reorder_types(&base, &token, order).await {
-                Ok(_) => refresh(),
+                Ok(_) => {
+                    toast("Type order saved — syncs to the watch");
+                    refresh();
+                }
                 Err(e) => set_error.set(Some(e)),
             }
         });
@@ -1513,7 +1576,16 @@ pub fn App() -> impl IntoView {
         spawn_local(async move {
             let body = json!({ "name": name, "colorCode": color, "icon": icon, "category": category, "config": config, "hrSamplingInterval": hr_interval });
             match post_json(&base, &token, "/api/v1/agoge-types", &body).await {
-                Ok(_) => { log_event("agoge", "created agoge"); refresh(); }
+                Ok(v) => {
+                    log_event("agoge", "created agoge");
+                    refresh();
+                    // Keep the editor open on the freshly created type.
+                    if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+                        set_selected_id.set(Some(id.to_string()));
+                    }
+                    type_saved.update(|n| *n += 1);
+                    toast("Type created");
+                }
                 Err(e) => set_error.set(Some(e)),
             }
         });
@@ -1528,6 +1600,8 @@ pub fn App() -> impl IntoView {
                 Ok(_) => {
                     log_event("agoge", "updated agoge");
                     refresh();
+                    type_saved.update(|n| *n += 1);
+                    toast("Type saved");
                 }
                 Err(e) => set_error.set(Some(e)),
             }
@@ -1539,7 +1613,11 @@ pub fn App() -> impl IntoView {
         let token = token.get();
         spawn_local(async move {
             match delete_json(&base, &token, &format!("/api/v1/agoge-types/{id}")).await {
-                Ok(_) => { log_event("agoge", "deleted agoge"); refresh(); }
+                Ok(_) => {
+                    log_event("agoge", "deleted agoge");
+                    toast("Type deleted");
+                    refresh();
+                }
                 Err(e) => set_error.set(Some(e)),
             }
         });
@@ -1550,7 +1628,11 @@ pub fn App() -> impl IntoView {
         let token = token.get();
         spawn_local(async move {
             match accept_detection(&base, &token, &id).await {
-                Ok(_) => { log_event("detection", "accepted workout"); refresh(); }
+                Ok(_) => {
+                    log_event("detection", "accepted workout");
+                    toast("Workout accepted");
+                    refresh();
+                }
                 Err(e) => set_error.set(Some(e)),
             }
         });
@@ -1561,7 +1643,11 @@ pub fn App() -> impl IntoView {
         let token = token.get();
         spawn_local(async move {
             match reject_detection(&base, &token, &id).await {
-                Ok(_) => { log_event("detection", "rejected workout"); refresh(); }
+                Ok(_) => {
+                    log_event("detection", "rejected workout");
+                    toast("Workout rejected");
+                    refresh();
+                }
                 Err(e) => set_error.set(Some(e)),
             }
         });
@@ -2555,7 +2641,8 @@ pub fn App() -> impl IntoView {
                                 on_zoom=Callback::new(move |range| handle_zoom(range))
                                 on_ready=Callback::new(move |id| handle_chart_ready(id))
                                 on_session_click=Callback::new(move |sid| handle_session_click(sid))
-                                on_session_edit=Callback::new(move |(sid, field, ms)| apply_session_time.call((sid, field, iso_from_ms(ms))))
+                                on_session_edit=Callback::new(move |(sid, field, ms)| drag_session_time.call((sid, field, iso_from_ms(ms))))
+                                selected_session=selected_session.read_only()
                             />
                             <div class="agoge-type-bar">
                                 <span class="agoge-type-label">"AGOGE TYPE"</span>
@@ -2630,6 +2717,7 @@ pub fn App() -> impl IntoView {
                                             let tname = cur.name.clone();
                                             let tcolor = cur.color_code.clone();
                                             let tcat = cur.category.clone();
+                                            let ticon = cur.icon.clone();
                                             view! {
                                                 <li class="sidebar-item"
                                                     class:on=move || selected_id.get().as_deref() == Some(tid.as_str())
@@ -2648,6 +2736,7 @@ pub fn App() -> impl IntoView {
                                                     }
                                                     on:click=move |_| set_selected_id.set(Some(tid_click.clone()))>
                                                     <span class="drag-handle" title="DRAG TO REORDER">"≡"</span>
+                                                    <span class="si-icon" inner_html=glyph_svg_tinted(&ticon, &tcolor)></span>
                                                     <span class="dot" style=format!("background:{tcolor}")></span>
                                                     <span class="si-name">{tname}</span>
                                                     <span class="si-cat">{tcat.to_uppercase()}</span>
@@ -2665,13 +2754,15 @@ pub fn App() -> impl IntoView {
                                         <div key=sel.clone()>
                                             <AgogeConfigForm
                                                 ty=ty
+                                                saved_trigger=type_saved
                                                 on_save=Callback::new(move |(n, c, i, cat, cfg, hr): (String, String, String, String, Value, i64)| {
+                                                    // Stay open: the form shows a transient "SAVED" on
+                                                    // its button (via saved_trigger) and a toast fires.
                                                     if let Some(id) = sel.clone() {
                                                         update_type(id, n, c, i, cat, cfg, hr);
                                                     } else {
                                                         create_type(n, c, i, cat, cfg, hr);
                                                     }
-                                                    set_selected_id.set(None);
                                                 })
                                                 on_delete=Callback::new(move |id: String| {
                                                     delete_type(id);
@@ -3492,6 +3583,11 @@ pub fn App() -> impl IntoView {
                 <span class="oracle-fab-glyph" inner_html=LAMBDA></span>
                 <span>"PYTHIA"</span>
             </button>
+            <div class="toast-container" aria-live="polite">
+                <For each=move || toasts.get() key=|(id, _)| id.clone() let:t>
+                    <div class="toast">{move || t.1.clone()}</div>
+                </For>
+            </div>
             <Show when=move || oracle_open.get() fallback=|| ()>
                 <div class="oracle-panel" style=move || format!("width: {}px; height: {}px", oracle_w.get(), oracle_h.get())>
                     <div class="oracle-resize" node_ref=oracle_resize_ref
@@ -4096,6 +4192,7 @@ fn SessionRow(
 #[component]
 fn AgogeConfigForm(
     ty: Option<AgogeType>,
+    saved_trigger: RwSignal<u32>,
     on_save: Callback<(String, String, String, String, Value, i64)>,
     on_delete: Callback<String>,
 ) -> impl IntoView {
@@ -4107,6 +4204,18 @@ fn AgogeConfigForm(
     let initial_category = ty.as_ref().map(|t| t.category.clone()).unwrap_or_else(|| "mixed".to_string());
     let (category, set_category) = create_signal(initial_category.clone());
     let (hr_interval, set_hr_interval) = create_signal(ty.as_ref().map(|t| t.hr_sampling_interval).unwrap_or(60));
+    // Transient "SAVED" state on the save button: the parent bumps
+    // saved_trigger when a save lands; the form stays open either way.
+    let (saved, set_saved) = create_signal(false);
+    create_effect(move |_| {
+        if saved_trigger.get() > 0 {
+            set_saved.set(true);
+            spawn_local(async move {
+                gloo_timers::future::TimeoutFuture::new(1800).await;
+                set_saved.set(false);
+            });
+        }
+    });
     // HR sampling choices (seconds), the same set as the watch Auto Push menu.
     let hr_choices: [(i64, &str); 9] = [
         (0, "OFF (OS automatic)"),
@@ -4215,8 +4324,8 @@ fn AgogeConfigForm(
             </label>
             <p class="muted">"While this Agoge is active the watch logs HR at this cadence (overrides Auto Push). Hiking with a long duration? Pick 30–60 min for battery."</p>
             <div class="config-actions">
-                <button class="btn" on:click=move |_| on_save.call((name.get(), color.get(), icon.get(), category.get(), config.get(), hr_interval.get()))>
-                    {if is_new { "CREATE" } else { "SAVE" }}
+                <button class="btn" class:saved=move || saved.get() on:click=move |_| on_save.call((name.get(), color.get(), icon.get(), category.get(), config.get(), hr_interval.get()))>
+                    {move || if saved.get() { "SAVED ✓" } else if is_new { "CREATE" } else { "SAVE" }}
                 </button>
                 {existing_id.clone().map(|id| {
                     view! {
