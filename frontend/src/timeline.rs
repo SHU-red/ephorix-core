@@ -1259,10 +1259,11 @@ fn render_workout_strip(
         label.set_text_content(Some(&format!("{name}  {}–{}", hhmm(from), hhmm(to))));
         let _ = el.append_child(&label);
         // Two-step edge editing: the SELECTED block shows two corner drag
-        // knobs (top-left = start, top-right = end), deliberately small and
-        // poking outside the block, so a plain click can never start a drag.
-        // The delegated pointer handlers drive the drag; `data-side` tells
-        // them which edge is being moved.
+        // dots (top-left = start, top-right = end), sitting fully OUTSIDE
+        // the block — above-left / above-right of the corners — so the block
+        // stays fully visible and a plain click can never start a drag. The
+        // delegated pointer handlers drive the drag; `data-side` tells them
+        // which edge is being moved.
         if selected_id == Some(s.id.as_str()) {
             for (cls, side) in [("slot-handle-corner-left", "start"), ("slot-handle-corner-right", "end")] {
                 let handle = doc.create_element("div").unwrap();
