@@ -26,6 +26,11 @@ pub enum MarkerKind {
     /// close the session — recorded for retro-analysis (rest detection).
     Pause,
     Resume,
+    /// User discarded the workout without logging it: the session and its
+    /// whole marker stream are DELETED (no orphaned start markers / open
+    /// sessions). `session_id` targets one session; absent -> the user's
+    /// latest open session. Deleting nothing is a success (idempotent).
+    Dismiss,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,7 +83,7 @@ pub async fn ingest_marker(
     State(pool): State<PgPool>,
     Extension(user): Extension<AuthUser>,
     Json(ev): Json<MarkerEvent>,
-) -> ApiResult<Json<AgogeSession>> {
+) -> ApiResult<Json<serde_json::Value>> {
     let MarkerEvent {
         kind,
         type_id,
@@ -92,24 +97,32 @@ pub async fn ingest_marker(
     let occurred_at = occurred_at.unwrap_or_else(Utc::now);
     let source = source.unwrap_or_else(|| "watch".to_string());
 
-    let (session, kind) = match kind {
+    match kind {
         MarkerKind::Start => {
             let s = start_session(&pool, user.0, type_id, type_name, occurred_at).await?;
-            (s, "start")
+            insert_marker(&pool, user.0, s.id, "start", occurred_at, &source, meta).await?;
+            Ok(Json(serde_json::to_value(s)?))
         }
         MarkerKind::Stop => {
             let s = stop_session(&pool, user.0, session_id, occurred_at, &summary).await?;
-            (s, "stop")
+            insert_marker(&pool, user.0, s.id, "stop", occurred_at, &source, meta).await?;
+            Ok(Json(serde_json::to_value(s)?))
         }
         MarkerKind::Pause | MarkerKind::Resume => {
             // Informational marker tied to the open session; never closes it.
             let s = open_session(&pool, user.0, session_id).await?;
-            (s, if kind == MarkerKind::Pause { "pause" } else { "resume" })
+            let k = if kind == MarkerKind::Pause { "pause" } else { "resume" };
+            insert_marker(&pool, user.0, s.id, k, occurred_at, &source, meta).await?;
+            Ok(Json(serde_json::to_value(s)?))
         }
-    };
-
-    insert_marker(&pool, user.0, session.id, kind, occurred_at, &source, meta).await?;
-    Ok(Json(session))
+        MarkerKind::Dismiss => {
+            // Discard without logging: delete the session AND its markers
+            // (no orphaned start markers). Idempotent — nothing to delete
+            // is still a 200, so a retried queued job never stalls.
+            let deleted = dismiss_session(&pool, user.0, session_id).await?;
+            Ok(Json(json!({ "deleted": deleted })))
+        }
+    }
 }
 
 async fn start_session(
@@ -199,6 +212,54 @@ async fn stop_session(
         .ok_or_else(|| ApiError::NotFound("no open agoge session".to_string()))?
     };
     Ok(session)
+}
+
+/// Deletes the given session (if owned) — else the user's latest open
+/// session — together with its whole marker stream (see
+/// agoge_sessions::delete for the same transactional cleanup). Returns the
+/// deleted id, or None when there was nothing to delete (idempotent: a
+/// retried queued dismiss must not fail).
+async fn dismiss_session(
+    pool: &PgPool,
+    user_id: Uuid,
+    session_id: Option<Uuid>,
+) -> ApiResult<Option<Uuid>> {
+    let target = if let Some(sid) = session_id {
+        sqlx::query_as::<_, AgogeSession>(
+            "SELECT * FROM agoge_sessions WHERE id = $1 AND user_id = $2",
+        )
+        .bind(sid)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, AgogeSession>(
+            "SELECT * FROM agoge_sessions
+             WHERE user_id = $1 AND status = 'active'
+             ORDER BY start_time DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?
+    };
+
+    let Some(session) = target else {
+        return Ok(None);
+    };
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM agoge_markers WHERE session_id = $1 AND user_id = $2")
+        .bind(session.id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM agoge_sessions WHERE id = $1 AND user_id = $2")
+        .bind(session.id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Some(session.id))
 }
 
 /// Resolves the session a marker should be attached to: the given one (if

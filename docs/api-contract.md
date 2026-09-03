@@ -47,12 +47,16 @@ Response `201`:
 Discrete event from the watch (or web). The backend materializes the session:
 `start` → creates an `active` session; `stop` → closes it (by `sessionId` or the
 latest open one). `pause` / `resume` are informational rest-period markers —
-recorded against the open session, never closing it. Unknown/missing type →
-session recorded as **Undefined Agoge** (`typeId: null`).
+recorded against the open session, never closing it. `dismiss` → the session is
+**discarded without logging**: the session row and its whole marker stream are
+deleted (by `sessionId`, else the user's latest open session); deleting nothing
+is still a 200 so a retried queued job never stalls, and the response is
+`{ "deleted": "<uuid>" | null }`. Unknown/missing type → session recorded as
+**Undefined Agoge** (`typeId: null`).
 
 ```jsonc
 {
-  "kind": "start",                        // "start" | "stop" | "pause" | "resume"
+  "kind": "start",                        // "start" | "stop" | "pause" | "resume" | "dismiss"
   "typeId": "11111111-1111-1111-1111-111111111111", // optional UUID (start only)
   "typeName": "Strength",                 // optional fallback lookup
   "occurredAt": "2026-08-18T09:30:00Z",   // optional, defaults to now()

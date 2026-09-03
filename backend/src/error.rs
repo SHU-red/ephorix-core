@@ -18,6 +18,8 @@ pub enum ApiError {
     Conflict(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+    #[error(transparent)]
+    Serialize(#[from] serde_json::Error),
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
@@ -35,6 +37,14 @@ impl IntoResponse for ApiError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal_error",
                     "database error".to_string(),
+                )
+            }
+            ApiError::Serialize(e) => {
+                tracing::error!("serialization error: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "response serialization failed".to_string(),
                 )
             }
         };
