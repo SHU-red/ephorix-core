@@ -356,6 +356,31 @@ select { min-width: 120px; }
 .workout-slot.narrow .workout-slot-icon svg { width: 18px; height: 18px; }
 .workout-slot.narrow .workout-slot-label { display: none; }
 .workout-slot.open { outline: 2px dashed #ff5252; }
+/* Session with no real stop marker: the drawn right edge is the read-time
+   bound (effectiveEnd), not a real end. Dashed red edge + a small badge
+   flag it as a TODO — the user sets the end by dragging the end knob. */
+.workout-slot.needs-end { border-right: 2px dashed #ff5252; }
+.workout-slot .workout-slot-needs-end {
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 9px;
+  line-height: 1.4;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #ff5252;
+  background: rgba(0, 0, 0, 0.75);
+  border: 1px solid #ff5252;
+  border-radius: 2px;
+  padding: 0 3px;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+/* Too thin for the badge: the dashed edge alone carries the signal. */
+.workout-slot.narrow .workout-slot-needs-end { display: none; }
 
 /* Rich workout hover popup: fixed to the cursor (survives page scroll), same
    visual language as .ephorix-tooltip, appended to the workout ROW so the

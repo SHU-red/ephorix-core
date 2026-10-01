@@ -29,18 +29,68 @@ pub struct SessionListQuery {
     pub limit: Option<i64>,
 }
 
+/// `list` row: an `AgogeSession` plus the rendering bounds computed at read
+/// time. No schema migration — `effective_end` is derived.
+#[derive(Debug, sqlx::FromRow)]
+#[allow(dead_code)] // some AgogeSession columns are selected but not sent on the wire
+struct SessionListRow {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub type_id: Option<Uuid>,
+    pub start_time: DateTime<Utc>,
+    pub end_time: Option<DateTime<Utc>>,
+    pub status: String,
+    pub duration_sec: Option<i32>,
+    pub workout_kcal: Option<f32>,
+    pub avg_hr: Option<i32>,
+    pub reps: Option<i32>,
+    pub movement_intensity: Option<f32>,
+    pub distance_m: Option<f32>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub effective_end: DateTime<Utc>,
+    pub last_data_at: Option<DateTime<Utc>>,
+    /// TODO signal: this session got a Start marker but no Stop. The UI
+    /// resolves it by setting `end_time` via the existing session `update`
+    /// endpoint (PATCH/PUT /api/v1/agoge/sessions/:id).
+    pub needs_end: bool,
+}
+
 pub async fn list(
     State(pool): State<PgPool>,
     Extension(user): Extension<AuthUser>,
     Query(q): Query<SessionListQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let sessions: Vec<AgogeSession> = sqlx::query_as(
-        "SELECT * FROM agoge_sessions
-         WHERE user_id = $1
-           AND ($2::text IS NULL OR status = $2)
-           AND ($3::timestamptz IS NULL OR start_time >= $3)
-           AND ($4::timestamptz IS NULL OR start_time <= $4)
-         ORDER BY start_time DESC
+    let sessions: Vec<SessionListRow> = sqlx::query_as(
+        "SELECT s.*,
+                COALESCE(
+                    s.end_time,
+                    LEAST(
+                        COALESCE(ns.next_start, 'infinity'::timestamptz),
+                        COALESCE(ld.last_data, 'infinity'::timestamptz),
+                        now()
+                    )
+                ) AS effective_end,
+                ld.last_data AS last_data_at,
+                (s.end_time IS NULL
+                 AND (ld.last_data IS NULL
+                      OR ld.last_data < now() - interval '10 minutes')) AS needs_end
+         FROM agoge_sessions s
+         LEFT JOIN LATERAL (
+             SELECT MIN(start_time) AS next_start
+             FROM agoge_sessions
+             WHERE user_id = s.user_id AND start_time > s.start_time
+         ) ns ON true
+         LEFT JOIN LATERAL (
+             SELECT MAX(timestamp) AS last_data
+             FROM raw_health_data
+             WHERE user_id = s.user_id AND timestamp >= s.start_time
+         ) ld ON true
+         WHERE s.user_id = $1
+           AND ($2::text IS NULL OR s.status = $2)
+           AND ($3::timestamptz IS NULL OR s.start_time >= $3)
+           AND ($4::timestamptz IS NULL OR s.start_time <= $4)
+         ORDER BY s.start_time DESC
          LIMIT $5",
     )
     .bind(user.0)
@@ -68,6 +118,9 @@ pub async fn list(
                 "reps": s.reps,
                 "movementIntensity": s.movement_intensity,
                 "distanceM": s.distance_m,
+                "effectiveEnd": s.effective_end,
+                "needsEnd": s.needs_end,
+                "lastDataAt": s.last_data_at,
             })
         })
         .collect();

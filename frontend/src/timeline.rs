@@ -661,7 +661,7 @@ pub fn TimelineChart(
             let sess = sessions.get();
             let Some(s) = sess.iter().find(|s| s.id == session_id) else { return };
             let Some(from) = ms_from_iso(&s.start_time) else { return };
-            let to = s.end_time.as_deref().and_then(ms_from_iso).unwrap_or(js_sys::Date::now());
+            let to = session_draw_end(s);
             let fixed_ts = if side == "start" { to } else { from };
             let fixed_px = ephorix_val_to_pos(id, fixed_ts).clamp(0.0, bbox.width);
             let _ = slot.set_attribute("data-drag-side", &side);
@@ -1049,6 +1049,18 @@ fn slot_fg(bg: &str) -> &'static str {
     }
 }
 
+/// End used for drawing/dragging a session's bar: the backend's read-time
+/// bounded `effectiveEnd` first, then a real `endTime`, then now. An
+/// abandoned session therefore stops at its bound instead of growing to
+/// `now()` forever.
+fn session_draw_end(s: &AgogeSession) -> f64 {
+    s.effective_end
+        .as_deref()
+        .or(s.end_time.as_deref())
+        .and_then(ms_from_iso)
+        .unwrap_or_else(js_sys::Date::now)
+}
+
 /// "HH:MM" in local time, for workout slot labels.
 fn hhmm(ms: f64) -> String {
     let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms));
@@ -1179,7 +1191,10 @@ fn render_workout_strip(
     let now = js_sys::Date::now();
     for s in sessions {
         let Some(from) = ms_from_iso(&s.start_time) else { continue };
-        let to = s.end_time.as_deref().and_then(ms_from_iso).unwrap_or(now);
+        let to = s.effective_end.as_deref()
+            .or(s.end_time.as_deref())
+            .and_then(ms_from_iso)
+            .unwrap_or(now);
         if to < from {
             continue;
         }
@@ -1208,6 +1223,11 @@ fn render_workout_strip(
             .dyn_into::<web_sys::HtmlDivElement>()
             .unwrap();
         let mut classes = if s.status == "active" { "workout-slot open" } else { "workout-slot" }.to_string();
+        if s.needs_end {
+            // Bar is bounded by effectiveEnd above; this only flags the
+            // missing stop marker the user still has to set.
+            classes.push_str(" needs-end");
+        }
         if w < 44.0 {
             classes.push_str(" narrow");
         }
@@ -1258,6 +1278,15 @@ fn render_workout_strip(
         let _ = label.set_attribute("style", &format!("color:{lcolor};text-shadow:{lshadow};"));
         label.set_text_content(Some(&format!("{name}  {}–{}", hhmm(from), hhmm(to))));
         let _ = el.append_child(&label);
+        if s.needs_end {
+            // Small marker at the bounded edge; the dashed right border in
+            // CSS shows the end is synthetic. Plain pointer-events: none so
+            // click-to-select and the drag knobs keep working.
+            let badge = doc.create_element("span").unwrap();
+            badge.set_class_name("workout-slot-needs-end");
+            badge.set_text_content(Some("set end"));
+            let _ = el.append_child(&badge);
+        }
         // Two-step edge editing: the SELECTED block shows two corner drag
         // dots (top-left = start, top-right = end), sitting fully OUTSIDE
         // the block — above-left / above-right of the corners — so the block

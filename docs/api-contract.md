@@ -140,9 +140,44 @@ Marker event stream for the user (for retro-analysis / UI).
 ## 4. Agoge Sessions CRUD
 
 ### `GET /api/v1/agoge-sessions?status=active&from=&to=&limit=`
-```json
-{ "sessions": [ /* AgogeSession as above */ ] }
+
+Session list for the timeline/cards. `effectiveEnd` is the **read-time bounded
+end** used for rendering. It exists because a session whose `stop` marker was
+lost has no `endTime`, and drawing that to `now()` produced a bar that grew
+forever and overlapped every later workout.
+
+```jsonc
+{
+  "sessions": [
+    {
+      "id": "...", "typeId": "...", "startTime": "2026-08-18T09:30:00Z",
+      "endTime": null,                 // null == never received a stop
+      "status": "active",
+      // watch stop summary (all null until the watch reports an end)
+      "durationSec": null, "workoutKcal": null, "avgHr": null,
+      "reps": null, "movementIntensity": null, "distanceM": null,
+
+      // --- open-workout handling --------------------------------------------
+      "effectiveEnd": "2026-08-18T10:05:00Z", // NEVER null: endTime when closed,
+                                              // else min(next session's start,
+                                              // last raw sample, now)
+      "lastDataAt": "2026-08-18T10:05:00Z",   // last raw_health_data sample in
+                                              // the window; null if none
+      "needsEnd": true                        // TODO: no stop marker AND no
+                                              // data for 10+ minutes
+    }
+  ]
+}
 ```
+
+`needsEnd` is what the UI flags as "set end". It is deliberately **false for a
+live session** (data still arriving, `effectiveEnd == now()`), so a workout
+that is genuinely still running is not marked incomplete. Resolve it through
+the normal edit path: `PATCH` the session with an `endTime`.
+
+Only one Agoge is open at a time — a new `start` closes any earlier `active`
+session — so the bounding rule matters for the *trailing* session: the one
+left open when the watch never sent its `stop` and no later workout followed.
 
 ### `POST /api/v1/agoge-sessions` — retroactive creation from the web UI
 ```jsonc

@@ -36,6 +36,17 @@ pub struct AgogeSession {
     pub start_time: String,
     pub end_time: Option<String>,
     pub status: String,
+    // Read-time bounded end computed by the backend for sessions that never
+    // received a stop marker: never after the next session's start, the last
+    // raw sample, or now. `needs_end` flags the session as a TODO (no real
+    // end_time and no live data); the user resolves it by dragging the end
+    // knob. All three are `default` so older payloads still parse.
+    #[serde(default)]
+    pub effective_end: Option<String>,
+    #[serde(default)]
+    pub needs_end: bool,
+    #[serde(default)]
+    pub last_data_at: Option<String>,
     // Watch stop summary (StopSummaryJson -> agoge_sessions columns, all
     // NULL until the watch reports a workout end). SessionDetails shows
     // these directly; /stats keeps computing live from measurements.
