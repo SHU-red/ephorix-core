@@ -3,8 +3,10 @@ FROM rust:1.97-slim AS builder
 
 WORKDIR /app
 
-# Build deps first for layer caching.
-COPY Cargo.toml ./
+# Build deps first for layer caching. Cargo.lock is copied too: without it the
+# dependency graph is re-resolved on every build and the cached layer above
+# does not reflect what actually ships.
+COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src && echo 'fn main() {}' > src/main.rs \
     && cargo build --release \
     && rm -rf src

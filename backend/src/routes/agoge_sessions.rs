@@ -82,9 +82,17 @@ pub async fn list(
              WHERE user_id = s.user_id AND start_time > s.start_time
          ) ns ON true
          LEFT JOIN LATERAL (
+             -- Bound to THIS session's window. Without the upper bound an
+             -- abandoned older session inherits the raw samples of every
+             -- later workout, so `last_data` looks recent, `needs_end` stays
+             -- false and the session is never flagged — exactly the case this
+             -- exists for (several start-without-stop sessions in a row).
+             -- `ns` is joined to the left, so it is in scope here.
              SELECT MAX(timestamp) AS last_data
              FROM raw_health_data
-             WHERE user_id = s.user_id AND timestamp >= s.start_time
+             WHERE user_id = s.user_id
+               AND timestamp >= s.start_time
+               AND (ns.next_start IS NULL OR timestamp < ns.next_start)
          ) ld ON true
          WHERE s.user_id = $1
            AND ($2::text IS NULL OR s.status = $2)

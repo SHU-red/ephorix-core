@@ -1,0 +1,8 @@
+# The daemon receives the entire build context before any COPY runs, and
+# target/ is multi-GB here — without this, every `docker compose build api`
+# ships gigabytes it will never use.
+target/
+Dockerfile
+.dockerignore
+.git/
+.gitignore

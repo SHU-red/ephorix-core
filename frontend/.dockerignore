@@ -1,0 +1,8 @@
+# See backend/.dockerignore. dist/ is excluded on purpose: the image runs
+# `trunk build --release` itself, so a stale host bundle must never leak in.
+target/
+dist/
+Dockerfile
+.dockerignore
+.git/
+.gitignore
