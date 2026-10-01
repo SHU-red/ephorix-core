@@ -45,6 +45,21 @@ trunk serve --proxy-backend http://localhost:3000
 The UI defaults to same-origin API calls (BASE field empty); with the proxy
 flag it just works. Leave BASE empty in production (nginx does the proxying).
 
+### Watch ↔ backend loop (emulator)
+
+For iterating on the watch app against a local backend, `ephorix-pebble` ships
+a dev harness that boots the emulator, points the phone-side JS at
+`http://localhost:3000`, drives synthetic sensor scenarios, and asserts what
+reached the backend — including a dependency-free recorder backend for when you
+have no Docker/Postgres:
+
+```bash
+cd ../ephorix-pebble
+./scripts/dev.sh help
+```
+
+See the "Dev loop" section of `ephorix-pebble/README.md`.
+
 ## Watch app via CloudPebble
 
 No Pebble SDK on your machine required — CloudPebble (rebble.io) builds for

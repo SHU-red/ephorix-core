@@ -601,17 +601,23 @@ async fn type_profiles(pool: &PgPool, user_id: Uuid) -> ApiResult<Vec<TypeProfil
                    -- (a missing earlier row means baseline 0, so the value seen
                    -- is the delta). A baseline ABOVE the window's max means the
                    -- counter reset (local midnight) in between: treat it as 0.
+                   -- Both ends read from raw_health_data, NOT measurements: the
+                   -- latter also holds the noon-anchored `/health/days` full-day
+                   -- rows, whose value would be mistaken for the window max.
                    GREATEST(
-                       COALESCE(MAX(m.value) FILTER (WHERE m.metric = 'steps'), 0)
+                       COALESCE(MAX(end_v.v), 0)
                        - CASE WHEN COALESCE(MAX(base_v.v), 0)
-                                   <= COALESCE(MAX(m.value) FILTER (WHERE m.metric = 'steps'), 0)
+                                   <= COALESCE(MAX(end_v.v), 0)
                               THEN COALESCE(MAX(base_v.v), 0) ELSE 0 END, 0) AS steps,
                    (EXTRACT(EPOCH FROM (s.end_time - s.start_time)) / 60.0) AS mins
             FROM agoge_sessions s
             JOIN measurements m ON m.user_id = s.user_id AND m.ts >= s.start_time AND m.ts < s.end_time
-            LEFT JOIN LATERAL (SELECT b.value AS v FROM measurements b
-                               WHERE b.user_id = s.user_id AND b.metric = 'steps' AND b.ts < s.start_time
-                               ORDER BY b.ts DESC LIMIT 1) base_v ON TRUE
+            LEFT JOIN LATERAL (SELECT MAX(r.steps) AS v FROM raw_health_data r
+                               WHERE r.user_id = s.user_id AND r.steps IS NOT NULL
+                                 AND r.timestamp >= s.start_time AND r.timestamp < s.end_time) end_v ON TRUE
+            LEFT JOIN LATERAL (SELECT b.steps AS v FROM raw_health_data b
+                               WHERE b.user_id = s.user_id AND b.steps IS NOT NULL AND b.timestamp < s.start_time
+                               ORDER BY b.timestamp DESC LIMIT 1) base_v ON TRUE
             WHERE s.user_id = $1 AND s.end_time IS NOT NULL AND s.type_id IS NOT NULL
             GROUP BY s.id, s.type_id, s.start_time, s.end_time, s.user_id
         )
@@ -653,16 +659,22 @@ async fn classify(
             -- the window minus the last value before it, clamped at 0 (no
             -- earlier row means baseline 0, so the value seen is the delta).
             -- A baseline ABOVE the window's max means the counter reset (local
-            -- midnight) in between: treat it as 0.
+            -- midnight) in between: treat it as 0. Both ends read from
+            -- raw_health_data, NOT measurements: the latter also holds the
+            -- noon-anchored `/health/days` full-day rows, whose value would be
+            -- mistaken for the window max.
             GREATEST(
-                COALESCE(MAX(value) FILTER (WHERE metric = 'steps'), 0)
+                COALESCE(MAX(end_v.v), 0)
                 - CASE WHEN COALESCE(MAX(base_v.v), 0)
-                            <= COALESCE(MAX(value) FILTER (WHERE metric = 'steps'), 0)
+                            <= COALESCE(MAX(end_v.v), 0)
                        THEN COALESCE(MAX(base_v.v), 0) ELSE 0 END, 0)::float8
          FROM measurements
-         LEFT JOIN LATERAL (SELECT b.value AS v FROM measurements b
-                            WHERE b.user_id = $1 AND b.metric = 'steps' AND b.ts < $2
-                            ORDER BY b.ts DESC LIMIT 1) base_v ON TRUE
+         LEFT JOIN LATERAL (SELECT MAX(r.steps) AS v FROM raw_health_data r
+                            WHERE r.user_id = $1 AND r.steps IS NOT NULL
+                              AND r.timestamp >= $2 AND r.timestamp < $3) end_v ON TRUE
+         LEFT JOIN LATERAL (SELECT b.steps AS v FROM raw_health_data b
+                            WHERE b.user_id = $1 AND b.steps IS NOT NULL AND b.timestamp < $2
+                            ORDER BY b.timestamp DESC LIMIT 1) base_v ON TRUE
          WHERE user_id = $1 AND ts >= $2 AND ts < $3",
     )
     .bind(user_id)
