@@ -87,8 +87,39 @@ offline-first in the JS layer.
 
 ## Publishing containers (GHCR)
 
-Images are built **on your machine** and pushed to GitHub Packages — no CI.
-One tag drives the whole product (`api` + `web` always match).
+Two images, one tag, so `api` + `web` always match:
+`ghcr.io/shu-red/ephorix-api` (context `./backend`) and
+`ghcr.io/shu-red/ephorix-web` (context `./frontend`).
+
+### CI
+
+`.github/workflows/docker-publish.yml` builds and pushes both on every push to
+`main` and every `v*` tag. Pull requests build both images **without pushing**,
+so a broken Dockerfile fails before merge.
+
+- `main` → `:main`, `:<sha>`, `:latest`
+- `v1.2.3` → `:1.2.3`, `:1.2`, `:<sha>`, `:latest`
+- `latest` is tagged only on the default branch — which is what
+  `docker compose pull` resolves.
+
+**If the push fails with `denied: permission_denied: write_package`**, the
+build itself still succeeded — that error only appears at the export step. The
+cause is package access, not the workflow: `GITHUB_TOKEN` is scoped to this
+repository, and a package that already exists under the account but is **not
+linked to this repo** cannot be written by it. The images were first published
+by hand via `publish.sh` + a PAT, which is exactly how a package ends up
+unlinked. Fix once per image:
+
+> Profile → **Packages** → `ephorix-api` → *Package settings* → **Manage Actions
+> access** → *Add repository* → `SHU-red/ephorix-core`, role **Write**
+> (repeat for `ephorix-web`)
+
+Deleting the package works too — CI then recreates it already linked.
+Raising **Settings → Actions → General → Workflow permissions** is *not* the
+fix; the workflow already requests `packages: write` explicitly, and a run with
+the repo default set to read-write was still denied.
+
+### Local build (no CI round-trip)
 
 ```bash
 sudo docker login ghcr.io -u <github-user> -p <PAT>   # scope: write:packages

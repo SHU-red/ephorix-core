@@ -7,6 +7,16 @@ name: docker
 # main   -> also tags :latest, which is what `docker compose pull` resolves
 # v1.2.3 -> :1.2.3, :1.2, :latest
 # PRs    -> built but NOT pushed, so a broken Dockerfile fails before merge
+#
+# Push denied with `permission_denied: write_package`? The image BUILT — that
+# error comes from the export step, not the build. GITHUB_TOKEN is scoped to
+# this repository, and a package that already exists under the account but is
+# NOT linked to this repo cannot be written by it. Link it once per image:
+#   Profile -> Packages -> <image> -> Package settings -> Manage Actions
+#   access -> Add repository -> SHU-red/ephorix-core, role Write.
+# Raising Settings -> Actions -> General -> Workflow permissions does NOT help:
+# `packages: write` is already requested explicitly below, and a run with the
+# repo default set to read-write was still denied.
 on:
   push:
     branches: [main]
