@@ -594,12 +594,26 @@ async fn type_profiles(pool: &PgPool, user_id: Uuid) -> ApiResult<Vec<TypeProfil
             SELECT s.type_id,
                    AVG(m.value) FILTER (WHERE m.metric = 'heart_rate') AS avg_hr,
                    COALESCE(SUM(m.value) FILTER (WHERE m.metric = 'movement_intensity'), 0) AS movement,
-                   COALESCE(SUM(m.value) FILTER (WHERE m.metric = 'steps'), 0) AS steps,
+                   -- 'steps' is a CUMULATIVE counter (the watch pushes a running
+                   -- total), so SUM would scale with the push count. Use the
+                   -- counter's movement across the session instead: last value in
+                   -- the window minus the last value before it, clamped at 0
+                   -- (a missing earlier row means baseline 0, so the value seen
+                   -- is the delta). A baseline ABOVE the window's max means the
+                   -- counter reset (local midnight) in between: treat it as 0.
+                   GREATEST(
+                       COALESCE(MAX(m.value) FILTER (WHERE m.metric = 'steps'), 0)
+                       - CASE WHEN COALESCE(MAX(base_v.v), 0)
+                                   <= COALESCE(MAX(m.value) FILTER (WHERE m.metric = 'steps'), 0)
+                              THEN COALESCE(MAX(base_v.v), 0) ELSE 0 END, 0) AS steps,
                    (EXTRACT(EPOCH FROM (s.end_time - s.start_time)) / 60.0) AS mins
             FROM agoge_sessions s
             JOIN measurements m ON m.user_id = s.user_id AND m.ts >= s.start_time AND m.ts < s.end_time
+            LEFT JOIN LATERAL (SELECT b.value AS v FROM measurements b
+                               WHERE b.user_id = s.user_id AND b.metric = 'steps' AND b.ts < s.start_time
+                               ORDER BY b.ts DESC LIMIT 1) base_v ON TRUE
             WHERE s.user_id = $1 AND s.end_time IS NOT NULL AND s.type_id IS NOT NULL
-            GROUP BY s.id, s.type_id, s.start_time, s.end_time
+            GROUP BY s.id, s.type_id, s.start_time, s.end_time, s.user_id
         )
         SELECT type_id,
                AVG(avg_hr) AS avg_hr,
@@ -634,8 +648,21 @@ async fn classify(
     let feat: (Option<f64>, Option<f64>) = sqlx::query_as(
         "SELECT
             COALESCE(SUM(value) FILTER (WHERE metric = 'movement_intensity'), 0)::float8,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'steps'), 0)::float8
+            -- 'steps' is a CUMULATIVE counter, so SUM inflates with the push
+            -- count; use the counter's movement across [$2, $3): last value in
+            -- the window minus the last value before it, clamped at 0 (no
+            -- earlier row means baseline 0, so the value seen is the delta).
+            -- A baseline ABOVE the window's max means the counter reset (local
+            -- midnight) in between: treat it as 0.
+            GREATEST(
+                COALESCE(MAX(value) FILTER (WHERE metric = 'steps'), 0)
+                - CASE WHEN COALESCE(MAX(base_v.v), 0)
+                            <= COALESCE(MAX(value) FILTER (WHERE metric = 'steps'), 0)
+                       THEN COALESCE(MAX(base_v.v), 0) ELSE 0 END, 0)::float8
          FROM measurements
+         LEFT JOIN LATERAL (SELECT b.value AS v FROM measurements b
+                            WHERE b.user_id = $1 AND b.metric = 'steps' AND b.ts < $2
+                            ORDER BY b.ts DESC LIMIT 1) base_v ON TRUE
          WHERE user_id = $1 AND ts >= $2 AND ts < $3",
     )
     .bind(user_id)

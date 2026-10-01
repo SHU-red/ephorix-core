@@ -570,6 +570,13 @@ fn goal_pct(have: f64, goal: f64) -> f64 {
     if goal <= 0.0 { 0.0 } else { (have / goal * 100.0).min(100.0) }
 }
 
+/// Calendar days covered by the chart's current x-domain (timestamps in ms),
+/// at least 1. Per-day targets divide the range totals by this so a single
+/// good day in a multi-day range does not pin the bar at 100%.
+fn range_days(domain: (f64, f64)) -> f64 {
+    ((domain.1 - domain.0) / 86_400_000.0).max(1.0)
+}
+
 /// Monday 00:00 local of the ISO week containing `now_ms` — the anchor for
 /// the weekly intensity-hour total (week starts Monday).
 fn week_start_ms(now_ms: f64) -> f64 {
@@ -2976,18 +2983,18 @@ pub fn App() -> impl IntoView {
                                     <span class="row-name">"Steps / day"</span>
                                     <input prop:value=move || target_steps.get().to_string() on:input=move |ev| set_target_steps.set(event_target_value(&ev).parse().unwrap_or(0)) />
                                     <div class="bar">
-                                        <div class="bar-fill" style=move || format!("width: {}%", (points.get().iter().filter_map(|p| p.steps).sum::<i64>() as f64 / target_steps.get().max(1) as f64 * 100.0).min(100.0))></div>
+                                        <div class="bar-fill" style=move || format!("width: {}%", (points.get().iter().filter_map(|p| p.steps).sum::<i64>() as f64 / range_days(last_domain.get()) / target_steps.get().max(1) as f64 * 100.0).min(100.0))></div>
                                     </div>
                                 </div>
                                 <div class="target-row">
                                     <span class="row-name">"Active kcal / day"</span>
                                     <input prop:value=move || target_kcal.get().to_string() on:input=move |ev| set_target_kcal.set(event_target_value(&ev).parse().unwrap_or(0)) />
-                                    <div class="bar"><div class="bar-fill" style=move || format!("width: {}%", (points.get().iter().filter_map(|p| p.active_calories).sum::<f64>() / target_kcal.get().max(1) as f64 * 100.0).min(100.0))></div></div>
+                                    <div class="bar"><div class="bar-fill" style=move || format!("width: {}%", (points.get().iter().filter_map(|p| p.active_calories).sum::<f64>() / range_days(last_domain.get()) / target_kcal.get().max(1) as f64 * 100.0).min(100.0))></div></div>
                                 </div>
                                 <div class="target-row">
                                     <span class="row-name">"Sleep / night (h)"</span>
                                     <input prop:value=move || target_sleep.get().to_string() on:input=move |ev| set_target_sleep.set(event_target_value(&ev).parse().unwrap_or(0.0)) />
-                                    <div class="bar"><div class="bar-fill" style=move || format!("width: {}%", (sleep.get().iter().map(|s| s.sleep_seconds).sum::<f64>() / 3600.0 / target_sleep.get().max(0.1) * 100.0).min(100.0))></div></div>
+                                    <div class="bar"><div class="bar-fill" style=move || format!("width: {}%", (sleep.get().iter().map(|s| s.sleep_seconds).sum::<f64>() / 3600.0 / range_days(last_domain.get()) / target_sleep.get().max(0.1) * 100.0).min(100.0))></div></div>
                                 </div>
                                 <div class="target-row">
                                     <span class="row-name">"Intensity / week (h)"</span>

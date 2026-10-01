@@ -214,8 +214,9 @@ pub async fn delete(
     Ok(Json(json!({ "deleted": id, "markers": markers.rows_affected() })))
 }
 
-/// Aggregate stats for one session: duration, pause time, and measurement
-/// rollups over [start_time, end_time ?? now()].
+/// Aggregate stats for one session: duration, pause time, reps/HR measurement
+/// rollups over [start_time, end_time ?? now()], and active calories as the
+/// cumulative-counter delta across that window.
 pub async fn stats(
     State(pool): State<PgPool>,
     Extension(user): Extension<AuthUser>,
@@ -268,21 +269,65 @@ pub async fn stats(
         pause_sec += (end - p).num_seconds();
     }
 
-    let agg: (f64, f64, f64, f64) = sqlx::query_as(
+    let agg: (f64, f64, f64) = sqlx::query_as(
         "SELECT
             COALESCE(SUM(value) FILTER (WHERE metric = 'reps'), 0)::float8,
-            COALESCE(SUM(value) FILTER (WHERE metric = 'active_calories'), 0)::float8,
             COALESCE(AVG(value) FILTER (WHERE metric = 'heart_rate'), 0)::float8,
             COALESCE(MAX(value) FILTER (WHERE metric = 'heart_rate'), 0)::float8
          FROM measurements
          WHERE user_id = $1 AND ts >= $2 AND ts < $3
-           AND metric IN ('reps', 'active_calories', 'heart_rate')",
+           AND metric IN ('reps', 'heart_rate')",
     )
     .bind(user.0)
     .bind(session.start_time)
     .bind(end)
     .fetch_one(&pool)
     .await?;
+
+    // active_calories on the watch is a CUMULATIVE day total
+    // (`health_service_sum(metric, today, now)` per push), so summing the
+    // rows in the window inflates the session — measured: 1417 kcal reported
+    // for a 39-minute session whose true delta is 77. Burn across the window
+    // is the counter's movement: the last value inside [start, end) minus the
+    // last value strictly before start, clamped at 0. A baseline ABOVE the
+    // window's max means the counter reset (watch's local midnight) in
+    // between: the window started from 0, so treat the baseline as 0. Read
+    // from raw_health_data, NOT measurements: the latter also holds the
+    // noon-anchored `/health/days` full-day rows, whose value would get
+    // counted as if it had accrued inside the window.
+    let (calories,): (f64,) = sqlx::query_as(
+        "SELECT GREATEST(
+            COALESCE(end_v.v, 0)
+          - CASE WHEN COALESCE(base_v.v, 0) <= COALESCE(end_v.v, 0)
+                 THEN COALESCE(base_v.v, 0) ELSE 0 END,
+            0)::float8
+          FROM (SELECT MAX(active_calories) AS v FROM raw_health_data
+                WHERE user_id = $1 AND active_calories IS NOT NULL
+                  AND timestamp >= $2 AND timestamp < $3) end_v,
+               (SELECT (SELECT active_calories FROM raw_health_data
+                        WHERE user_id = $1 AND active_calories IS NOT NULL
+                          AND timestamp < $2
+                        ORDER BY timestamp DESC LIMIT 1) AS v) base_v",
+    )
+    .bind(user.0)
+    .bind(session.start_time)
+    .bind(end)
+    .fetch_one(&pool)
+    .await?;
+
+    // Fallback when the window holds no raw counter rows (the watch pushed
+    // nothing during this session — 15 of the 27 sessions in the live DB):
+    // report the watch's own Stop-summary delta instead of a misleading 0.
+    // Mirrors the avg_hr precedence below.
+    let calories = if calories > 0.0 {
+        calories
+    } else {
+        session
+            .workout_kcal
+            .map(f64::from)
+            .filter(|v| *v > 0.0)
+            .unwrap_or(0.0)
+    };
 
     let sets_agg: (i64, i64, f64) = sqlx::query_as(
         "SELECT
@@ -310,12 +355,12 @@ pub async fn stats(
         .filter(|v| *v > 0)
         .map(f64::from)
         .or_else(|| pulse["avgHr"].as_f64())
-        .or_else(|| (agg.2 > 0.0).then_some(agg.2))
+        .or_else(|| (agg.1 > 0.0).then_some(agg.1))
         .unwrap_or(0.0);
     // peakHr keeps the measurements max (exact per-minute values) and falls
     // back to the raw_health_data max when measurements have none.
-    let peak_hr = if agg.3 > 0.0 {
-        agg.3.round() as i64
+    let peak_hr = if agg.2 > 0.0 {
+        agg.2.round() as i64
     } else {
         pulse["maxHr"].as_i64().unwrap_or(0)
     };
@@ -325,7 +370,7 @@ pub async fn stats(
         "activeSec": duration_sec - pause_sec,
         "pauseSec": pause_sec,
         "reps": agg.0.round() as i64,
-        "calories": agg.1,
+        "calories": calories,
         "avgHr": avg_hr,
         "peakHr": peak_hr,
         "sets": sets_agg.0,

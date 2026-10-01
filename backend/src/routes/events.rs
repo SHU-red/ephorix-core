@@ -134,6 +134,38 @@ async fn start_session(
 ) -> ApiResult<AgogeSession> {
     let type_id = resolve_type_id(pool, type_id, type_name.as_deref()).await?;
 
+    // Replay of a queued Start (the JS queue retries on timeout/5xx): the same
+    // user + start_time is the same workout, so return the existing row instead
+    // of materializing a duplicate session.
+    if let Some(existing) = sqlx::query_as::<_, AgogeSession>(
+        "SELECT * FROM agoge_sessions
+         WHERE user_id = $1 AND start_time = $2
+         ORDER BY created_at LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(occurred_at)
+    .fetch_optional(pool)
+    .await?
+    {
+        return Ok(existing);
+    }
+
+    let mut tx = pool.begin().await?;
+
+    // One open Agoge at a time: a new Start implicitly closes whatever session
+    // the watch left open (a Stop was lost / never delivered). The watch's
+    // `dismiss` targets "the latest open session", so it still finds the right
+    // one after this close.
+    sqlx::query(
+        "UPDATE agoge_sessions
+         SET end_time = $2, status = 'closed', updated_at = now()
+         WHERE user_id = $1 AND status = 'active'",
+    )
+    .bind(user_id)
+    .bind(occurred_at)
+    .execute(&mut *tx)
+    .await?;
+
     let session = sqlx::query_as::<_, AgogeSession>(
         "INSERT INTO agoge_sessions (user_id, type_id, start_time, status)
          VALUES ($1, $2, $3, 'active')
@@ -142,9 +174,10 @@ async fn start_session(
     .bind(user_id)
     .bind(type_id)
     .bind(occurred_at)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
+    tx.commit().await?;
     Ok(session)
 }
 
@@ -181,9 +214,6 @@ async fn stop_session(
         .bind(summary.distance_m)
         .fetch_optional(pool)
         .await?
-        .ok_or_else(|| {
-            ApiError::NotFound("session not found, not owned, or already closed".to_string())
-        })?
     } else {
         sqlx::query_as::<_, AgogeSession>(
             "UPDATE agoge_sessions
@@ -209,9 +239,33 @@ async fn stop_session(
         .bind(summary.distance_m)
         .fetch_optional(pool)
         .await?
-        .ok_or_else(|| ApiError::NotFound("no open agoge session".to_string()))?
     };
-    Ok(session)
+
+    if let Some(session) = session {
+        return Ok(session);
+    }
+
+    // No open session to close: almost always a REPLAY of a Stop the watch
+    // already delivered (the queued job was retried after a timeout). The
+    // matching stop marker is the proof — return the session it closed rather
+    // than a 404, which would strand the queued job as `stalled` forever.
+    if let Some(session) = sqlx::query_as::<_, AgogeSession>(
+        "SELECT s.* FROM agoge_sessions s
+         JOIN agoge_markers m ON m.session_id = s.id
+         WHERE m.user_id = $1 AND m.kind = 'stop' AND m.occurred_at = $2
+         LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(occurred_at)
+    .fetch_optional(pool)
+    .await?
+    {
+        return Ok(session);
+    }
+
+    Err(ApiError::NotFound(
+        "session not found, not owned, or already closed".to_string(),
+    ))
 }
 
 /// Deletes the given session (if owned) — else the user's latest open
@@ -302,10 +356,13 @@ async fn insert_marker(
     occurred_at: DateTime<Utc>,
     source: &str,
     meta: Option<serde_json::Value>,
-) -> ApiResult<()> {
-    sqlx::query(
+) -> ApiResult<bool> {
+    // Natural key (user_id, kind, occurred_at): a retried marker is dropped by
+    // the unique index instead of being duplicated. Returns false on a replay.
+    let result = sqlx::query(
         "INSERT INTO agoge_markers (user_id, session_id, kind, occurred_at, source, meta)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (user_id, kind, occurred_at) DO NOTHING",
     )
     .bind(user_id)
     .bind(session_id)
@@ -315,7 +372,7 @@ async fn insert_marker(
     .bind(meta)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 /// Validates a client-supplied type id; falls back to name match; else

@@ -14,9 +14,16 @@ The `timeline` endpoint returns epoch **milliseconds** to keep charting fast.
 
 ### `POST /api/v1/health/batch`
 
-High-throughput push of batched raw sensor metrics. One transaction per batch.
-Max 1000 samples per batch. Idempotent-ish: plain inserts (dedupe by the watch
-queue, which retries only until acknowledged).
+High-throughput push of batched raw sensor metrics. Max 1000 samples per batch.
+Idempotent: rows dedupe on `(userId, timestamp)` (`ON CONFLICT DO NOTHING`), so a
+re-pushed or retried batch never duplicates. Writes are **first-write-wins** — a
+retry carrying corrected values for an existing timestamp is ignored.
+
+**Counter semantics (important).** `steps` and `activeCalories` are the watch's
+*cumulative local-day totals* (`health_service_sum(metric, start_of_today, now)`),
+NOT per-bucket deltas. The watch re-sends the growing value at every cadence, and
+the read path re-derives per-bucket deltas (the timeline SQL). Consumers MUST NOT
+`SUM()` these rows. `heartRate` is an instantaneous (filtered) sample.
 
 ```jsonc
 {
@@ -26,17 +33,39 @@ queue, which retries only until acknowledged).
     {
       "timestamp": "2026-08-18T09:59:00Z", // REQUIRED
       "heartRate": 128,                    // optional, BPM, null while off-wrist
-      "steps": 42,                         // optional, step delta in bucket
-      "activeCalories": 3.2                // optional, kcal delta in bucket
+      "steps": 42,                         // optional, CUMULATIVE steps since local midnight
+      "activeCalories": 3.2                // optional, CUMULATIVE kcal since local midnight
     }
   ]
 }
 ```
 
-Response `201`:
+Response `200`:
 ```json
-{ "inserted": 2 }
+{ "inserted": 2, "normalized": 2 }
 ```
+`inserted` counts raw + normalized rows; `normalized` is the `measurements`
+mirror subset.
+
+### `POST /api/v1/health/days`
+
+Daily aggregate backfill from the watch (Pebble Health retains up to 30 days).
+Max 31 days per batch. Each day becomes one `measurements` row per present
+metric, anchored at the day's **UTC 12:00** (`YYYY-MM-DD` is the watch's local
+date). Idempotent on `(userId, metric, ts)` — re-posting a day is a no-op.
+
+```jsonc
+{
+  "deviceId": "pebble:6b3a7f",
+  "batchedAt": "2026-08-18T10:00:00Z",
+  "days": [
+    { "d": "2026-08-17", "steps": 12000, "activeKcal": 540,
+      "sleepSeconds": 26400, "restfulSleepSeconds": 7200,
+      "distanceM": 9100, "activeSeconds": 3100, "restingKcal": 1600 }
+  ]
+}
+```
+Response `200`: `{ "inserted": <n> }`. Absent fields are omitted (never zero).
 
 ---
 
@@ -53,6 +82,12 @@ deleted (by `sessionId`, else the user's latest open session); deleting nothing
 is still a 200 so a retried queued job never stalls, and the response is
 `{ "deleted": "<uuid>" | null }`. Unknown/missing type → session recorded as
 **Undefined Agoge** (`typeId: null`).
+
+**Idempotency & lifecycle.** Markers dedupe on `(userId, kind, occurredAt)` — a
+replayed marker is a no-op, and a replayed `stop` returns the already-closed
+session (200) instead of a 404, so a retried queued job never strands. Only one
+Agoge is open at a time: a new `start` closes any other `active` session, so a
+lost `stop` self-heals instead of leaving an orphaned open session.
 
 ```jsonc
 {
