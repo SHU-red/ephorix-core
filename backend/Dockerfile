@@ -8,13 +8,13 @@ WORKDIR /app
 # does not reflect what actually ships.
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src && echo 'fn main() {}' > src/main.rs \
-    && cargo build --release \
+    && cargo build --release --locked \
     && rm -rf src
 
 # Migrations are embedded at compile time via sqlx::migrate!.
 COPY migrations ./migrations
 COPY src ./src
-RUN touch src/main.rs && cargo build --release
+RUN touch src/main.rs && cargo build --release --locked
 
 FROM debian:bookworm-slim
 

@@ -1,0 +1,80 @@
+name: docker
+
+# Builds and publishes the two images docker-compose.yml expects:
+#   ghcr.io/shu-red/ephorix-api   (./backend)
+#   ghcr.io/shu-red/ephorix-web   (./frontend)
+#
+# main   -> also tags :latest, which is what `docker compose pull` resolves
+# v1.2.3 -> :1.2.3, :1.2, :latest
+# PRs    -> built but NOT pushed, so a broken Dockerfile fails before merge
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # required to push to ghcr
+    strategy:
+      # One failing image must not hide the other's result.
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            context: ./backend
+            image: ephorix-api
+          - name: web
+            context: ./frontend
+            image: ephorix-web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Docker references MUST be lowercase; the owner is `SHU-red`, so
+      # using github.repository_owner verbatim yields
+      # `ghcr.io/SHU-red/...` and the push fails with
+      # "repository name must be lowercase".
+      - id: owner
+        run: echo "name=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ steps.owner.outputs.name }}/${{ matrix.image }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cargo/trunk builds are the slow part; the gha cache keeps a warm
+          # dependency layer between runs. Separate scope per image so the two
+          # matrices never evict each other.
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

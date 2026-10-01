@@ -13,7 +13,7 @@ COPY index.html ./
 COPY public ./public
 COPY src ./src
 
-RUN trunk build --release
+RUN trunk build --release --locked
 
 # Cache-bust stable public/ assets: give style.css and uplot-bridge.js a
 # per-build content hash in the URL and rewrite index.html to match. A stale
